@@ -24,6 +24,7 @@ from .rebotarm import (
     RebotArm,
     JointGroup,
     JointCfg,
+    JointLimitError,
     load_cfg,
     load_gravity_compensation_config,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "RebotArm",
     "JointGroup",
     "JointCfg",
+    "JointLimitError",
     "load_cfg",
     "load_gravity_compensation_config",
 ]

@@ -32,7 +32,9 @@ _hw_yaml = sys.argv[1] if len(sys.argv) > 1 else None
 rebotarm = RebotArm(_hw_yaml)
 print(f"[{rebotarm.hardware_yaml}] 使用配置:")
 print(f"[{rebotarm.hardware_yaml}] Using config: {rebotarm.hardware_yaml}")
-rebotarm.connect()
+# 设零前跳过限位检查：重新设零正是修复上电 2π 偏移的手段
+# Skip the limit check before zeroing: re-zeroing is what fixes a power-on 2π offset
+rebotarm.connect(check_limits=False)
 print("--- 连接成功 ---")
 print("--- Connection OK ---\n")
 
@@ -55,6 +57,7 @@ rebotarm.set_zero()
 _zeroing = False
 print("\r--- 零点已设置 ---" + " " * 30)
 print("--- Zero set ---\n")
+rebotarm.check_joint_limits()
 
 n_arm = rebotarm.arm.num_joints
 n_total = rebotarm.num_joints

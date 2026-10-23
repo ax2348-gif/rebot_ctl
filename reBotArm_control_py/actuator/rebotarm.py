@@ -29,8 +29,10 @@
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -114,7 +116,41 @@ def load_cfg(hw_yaml: str | None = None) -> dict:
         "groups": data.get("groups", {}),
         "joints": joints,
         "arm_control_mode": str(data.get("arm_control_mode", "posvel")),
+        "urdf_path": data.get("urdf_path"),
     }
+
+
+def load_joint_limits(urdf_path: str | None) -> Dict[str, tuple[float, float]]:
+    """从 URDF 读取 revolute/prismatic 关节的 [lower, upper] 限位。
+
+    Read [lower, upper] limits of revolute/prismatic joints from the URDF.
+    Relative paths resolve against the project root, like the kinematics loader.
+    """
+    if not urdf_path:
+        return {}
+    path = Path(urdf_path)
+    if not path.is_absolute():
+        path = _CFG_DIR.parent / path
+    if not path.exists():
+        raise FileNotFoundError(f"URDF not found (needed for joint-limit check): {path}")
+
+    limits: Dict[str, tuple[float, float]] = {}
+    for joint in ET.parse(path).getroot().iter("joint"):
+        if joint.get("type") not in ("revolute", "prismatic"):
+            continue
+        lim = joint.find("limit")
+        if lim is None or lim.get("lower") is None or lim.get("upper") is None:
+            continue
+        limits[joint.get("name")] = (float(lim.get("lower")), float(lim.get("upper")))
+    return limits
+
+
+class JointLimitError(RuntimeError):
+    """上电读数超出关节限位（常见原因：单圈编码器上电时多算/少算一圈 2π）。
+
+    A joint reads outside its URDF limits at connect time. The usual cause on
+    Damiao motors is a 2π power-on wrap of the single-turn output encoder.
+    """
 
 
 def load_gravity_compensation_config(
@@ -536,6 +572,7 @@ class RebotArm:
         self._all_joints: List[JointCfg] = cfg["joints"]
         self._groups_def: dict = cfg["groups"]
         self._arm_control_mode: str = cfg.get("arm_control_mode", "posvel")
+        self._joint_limits = load_joint_limits(cfg.get("urdf_path"))
 
         self._ctrl_map: Dict[str, Controller] = {}
         self._motor_map: Dict[str, any] = {}
@@ -549,12 +586,92 @@ class RebotArm:
 
         self._build_groups()
 
-    def connect(self) -> None:
-        """连接总线、注册电机。模式切换需在 connect 后调用。"""
+    # 读数允许超出 URDF 限位的余量（rad），容纳硬限位处的压缩/回差
+    # Allowed overshoot past URDF limits (rad), for compression/backlash at hard stops
+    LIMIT_MARGIN_RAD = 0.2
+
+    def connect(self, check_limits: bool = True) -> None:
+        """连接总线、注册电机。模式切换需在 connect 后调用。
+
+        默认会检查各关节读数是否在 URDF 限位内，不在则断开并抛出 JointLimitError。
+        仅零点校准脚本应传 check_limits=False（重新设零正是修复手段）。
+
+        By default every joint reading is checked against its URDF limits; on
+        failure the arm is disconnected and JointLimitError is raised. Only
+        zeroing scripts should pass check_limits=False, since re-zeroing is the fix.
+        """
         if self._connected:
             return
         self._setup_motors()
         self._connected = True
+        if check_limits:
+            try:
+                self.check_joint_limits()
+            except Exception:
+                self.disconnect()
+                raise
+
+    def check_joint_limits(self, timeout: float = 1.0) -> None:
+        """读取各关节位置，若无反馈或超出 URDF 限位则抛出 JointLimitError。
+
+        Read every joint's position; raise JointLimitError if any joint gives no
+        feedback or reads outside its URDF limits (± LIMIT_MARGIN_RAD).
+        Joints without URDF limits (e.g. the gripper) are skipped.
+        """
+        names = [jc.name for jc in self._all_joints if jc.name in self._joint_limits]
+        if not names:
+            return
+
+        # 上电后的首帧反馈可能尚未到达，轮询直到全部关节有状态或超时
+        # The first feedback frames may not have arrived yet; poll until all report.
+        positions: Dict[str, float] = {}
+        deadline = time.monotonic() + timeout
+        while True:
+            for name in names:
+                if name not in positions:
+                    try:
+                        self._motor_map[name].request_feedback()
+                    except Exception:
+                        pass
+            for ctrl in self._ctrl_map.values():
+                try:
+                    ctrl.poll_feedback_once()
+                except Exception:
+                    pass
+            for name in names:
+                st = self._motor_map[name].get_state()
+                if st is not None:
+                    positions[name] = float(st.pos)
+            if len(positions) == len(names) or time.monotonic() > deadline:
+                break
+            time.sleep(0.02)
+
+        problems: List[str] = []
+        m = self.LIMIT_MARGIN_RAD
+        for name in names:
+            lo, hi = self._joint_limits[name]
+            if name not in positions:
+                problems.append(f"  {name}: no position feedback within {timeout:.1f}s")
+                continue
+            q = positions[name]
+            if lo - m <= q <= hi + m:
+                continue
+            msg = (f"  {name}: reads {q:+.4f} rad ({math.degrees(q):+.1f}°), "
+                   f"limits [{lo:+.3f}, {hi:+.3f}] rad")
+            turns = round((q - (lo + hi) / 2) / (2 * math.pi))
+            if turns and lo - m <= q - turns * 2 * math.pi <= hi + m:
+                msg += (f" — off by {turns:+d}×2π; the encoder picked the wrong turn at power-on")
+            problems.append(msg)
+
+        if problems:
+            raise JointLimitError(
+                "Joint position check failed; refusing to continue:\n"
+                + "\n".join(problems)
+                + "\nFix: power off, put the arm in the pose it normally reads correctly in "
+                  "(e.g. press the joint firmly onto its zero stop), power on and retry. "
+                  "Re-zeroing also clears it, but only do that with the arm at the "
+                  "calibrated zero pose."
+            )
 
     def _make_controller(self, vendor: str) -> Controller:
         if self._channel.startswith("/dev/tty"):
@@ -692,10 +809,39 @@ class RebotArm:
 
     # ── 全局状态读取 ───────────────────────────────────────────────────
 
+    # Damiao 只读寄存器：输出轴位置 / Damiao read-only register: output shaft position
+    _DM_RID_XOUT = 81
+    POSITION_SOURCES = ("feedback", "output")
+
     def get_state(
         self,
         request_feedback: bool = True,
+        position_source: str = "feedback",
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """返回 (pos, vel, torq)。
+
+        position_source:
+          - "feedback"（默认）：位置取自反馈帧，与控制指令同一坐标系。
+          - "output"：Damiao 关节的位置改为读取寄存器 81（xout，输出轴位置），
+            单位/范围未经验证，仅用于诊断，勿用于控制。每个电机一次寄存器往返，较慢。
+            读取失败抛出 CallError，不会以 0 代替。非 Damiao 关节仍用反馈帧。
+
+        Returns (pos, vel, torq).
+
+        position_source:
+          - "feedback" (default): position from the feedback frame, the same
+            frame control commands use.
+          - "output": Damiao joints read register 81 (xout, output shaft
+            position) instead. Units/range unverified: diagnostics only, never
+            feed it back into control. One register round trip per motor, so
+            slow. A failed read raises CallError rather than reporting 0.
+            Non-Damiao joints keep the feedback-frame position.
+        vel and torq always come from the feedback frame.
+        """
+        if position_source not in self.POSITION_SOURCES:
+            raise ValueError(
+                f"position_source must be one of {self.POSITION_SOURCES}, got {position_source!r}"
+            )
         if request_feedback:
             for m in self._motor_map.values():
                 try:
@@ -718,14 +864,19 @@ class RebotArm:
                 pos.append(0.0)
                 vel.append(0.0)
                 torq.append(0.0)
+        if position_source == "output":
+            for i, jc in enumerate(self._all_joints):
+                if jc.vendor == "damiao":
+                    m = self._motor_map[jc.name]
+                    pos[i] = float(m.get_register_f32(self._DM_RID_XOUT, 500))
         return (
             np.array(pos, dtype=np.float64),
             np.array(vel, dtype=np.float64),
             np.array(torq, dtype=np.float64),
         )
 
-    def get_positions(self) -> np.ndarray:
-        return self.get_state()[0]
+    def get_positions(self, position_source: str = "feedback") -> np.ndarray:
+        return self.get_state(position_source=position_source)[0]
 
     def get_velocities(self) -> np.ndarray:
         return self.get_state()[1]
