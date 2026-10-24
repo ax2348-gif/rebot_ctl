@@ -21,10 +21,9 @@ mirrors its pose in real time and the end-effector pose is printed.
       启动时将当前姿态设为零点（会覆盖原有零点！）
       Set the current pose as zero on startup (overwrites existing zero!)
 
-    python tools/vis_bot.py --can-timeout-ms 100
-      设置电机 CAN 通讯超时（仅写 RAM，不保存）。拔掉 CAN 线后电机应自动退出使能。
-      Set the motors' CAN watchdog (RAM only, not stored). Unplugging CAN should
-      make the motors drop out of enabled mode on their own.
+CAN 看门狗（100 ms）已存储在电机 flash 中，由 RebotArm.connect() 校验，此处不可修改。
+The CAN watchdog (100 ms) is stored in motor flash and verified by
+RebotArm.connect(); this tool cannot change it.
 """
 import argparse
 import signal
@@ -37,8 +36,11 @@ import numpy as np
 import pinocchio as pin
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from motorbridge import CallError
 from reBotArm_control_py.actuator import RebotArm
 from reBotArm_control_py.kinematics import compute_fk, get_arm_joint_count, pad_q_for_model
+from reBotArm_control_py.dynamics import compute_generalized_gravity, load_dynamics_model
+from reBotArm_control_py.dynamics.robot_model import create_data
 from example.sim.visualizer import Visualizer
 
 # 可视化/打印刷新频率 / Visualization & print refresh rate
@@ -85,23 +87,12 @@ def set_zero_with_progress(rebotarm: RebotArm) -> None:
     print("\r--- 零点已设置 / Zero set ---" + " " * 30 + "\n")
 
 
-def set_can_timeout(rebotarm: RebotArm, timeout_ms: int) -> None:
-    # 寄存器单位均为 50us（20 = 1ms）；只写 RAM，断电即恢复。
-    # motorbridge 的 set_can_timeout_ms 对 RobStride 未做 ×20 换算，故直接写参数 0x7028。
-    # Both vendors use 50us units (20 = 1ms); RAM only, reverts on power cycle.
-    # motorbridge's set_can_timeout_ms skips the ×20 for RobStride, so write 0x7028 directly.
+def clear_faults(rebotarm: RebotArm) -> None:
+    # 清除上次运行残留的故障（如看门狗触发后的通讯丢失），否则可能无法使能
+    # Clear faults left by a previous run (e.g. comm loss after a watchdog trip),
+    # which could otherwise stop the motors from enabling
     for jc in rebotarm._all_joints:
-        mot = rebotarm._motor_map[jc.name]
-        if jc.vendor == "damiao":
-            mot.set_can_timeout_ms(timeout_ms)
-        elif jc.vendor == "robstride":
-            mot.robstride_write_param_u32(0x7028, timeout_ms * 20)
-        else:
-            print(f"[{jc.name}] CAN timeout not supported for vendor {jc.vendor}, skipped")
-            continue
-        # 清除上次测试残留的通讯丢失故障 / Clear a LOST_COMM fault left by a previous test
-        mot.clear_error()
-    print(f"--- CAN 超时 / CAN timeout: {timeout_ms} ms ---\n")
+        rebotarm._motor_map[jc.name].clear_error()
 
 
 class StatusMonitor:
@@ -137,20 +128,88 @@ class StatusMonitor:
                 self._last[jc.name] = code
 
 
-def make_free_drive_controller(n_arm: int):
+class ReadTimer:
+    """每秒打印一次位置读取耗时（中位数/最大值）与超时次数。
+
+    Prints once a second how long the position reads took (median / max) and
+    how many timed out. Read times that creep upward second after second mean
+    the CAN bus is backing up; timeouts mean it is saturated.
+    """
+
+    def __init__(self, label: str, interval: float = 1.0) -> None:
+        self._label = label
+        self._interval = interval
+        self._times: list = []
+        self._timeouts = 0
+        self._t_report = time.monotonic()
+
+    def record(self, ms: float) -> None:
+        self._times.append(ms)
+        self._maybe_report()
+
+    def timeout(self, err: Exception) -> None:
+        self._timeouts += 1
+        print(f"\n[{self._label}] {err}", flush=True)
+        self._maybe_report()
+
+    def _maybe_report(self) -> None:
+        now = time.monotonic()
+        if now - self._t_report < self._interval:
+            return
+        if self._times:
+            t = sorted(self._times)
+            stats = f"median {t[len(t) // 2]:5.2f} ms  max {t[-1]:6.2f} ms"
+        else:
+            stats = "no successful reads"
+        print(f"\n[{self._label}] n={len(self._times)}  {stats}  timeouts {self._timeouts}",
+              flush=True)
+        self._times.clear()
+        self._timeouts = 0
+        self._t_report = now
+
+def make_test_controller(n_arm: int):
     # 随动模式：MIT 零刚度，机械臂可自由手动移动
     # Free-drive mode: MIT zero stiffness, arm can be freely moved by hand
     zeros_arm = np.zeros(n_arm)
     ones_arm = np.ones(n_arm)
     zeros_grip = np.zeros(1)
-    kp_arm = None #ones_arm*120.0
+    kp_arm = ones_arm*1.0
     kd_arm = None #ones_arm*8.0
     kp_grip = np.ones(1)
 
     def controller(r: RebotArm, dt: float) -> None:
         r.arm.send_mit(pos=zeros_arm, vel=zeros_arm, kp=kp_arm, kd=kd_arm, tau=zeros_arm)
         r.gripper.send_mit(pos=zeros_grip, vel=zeros_grip, kp=kp_grip, kd=zeros_grip, tau=zeros_grip)
+    return controller
 
+def make_gcomp_controller(n_arm: int, model,data):
+    # 随动模式：MIT 零刚度，机械臂可自由手动移动
+    # Free-drive mode: MIT zero stiffness, arm can be freely moved by hand
+    zeros_arm = np.zeros(n_arm)
+    ones_arm = np.ones(n_arm)
+    zeros_grip = np.zeros(1)
+    kp_arm = zeros_arm #ones_arm*120.0
+    kd_arm = ones_arm*0.07
+    kp_grip = np.ones(1)*0.0
+
+    def controller(r: RebotArm, dt: float) -> None:
+        pos = r.get_positions(position_source="output",request_feedback=False)
+        gtau = compute_generalized_gravity(model,pos,data)
+        gtau = np.clip(gtau, -20,20)*0.87
+        r.arm.send_mit(pos=zeros_arm, vel=zeros_arm, kp=kp_arm, kd=kd_arm, tau=gtau[:6])
+        r.gripper.send_mit(pos=zeros_grip, vel=zeros_grip, kp=kp_grip, kd=zeros_grip, tau=zeros_grip)
+    return controller
+
+def make_free_drive_controller(n_arm: int):
+    # 随动模式：MIT 零刚度，机械臂可自由手动移动
+    # Free-drive mode: MIT zero stiffness, arm can be freely moved by hand
+    zeros_arm = np.zeros(n_arm)
+    ones_arm = np.ones(n_arm)
+    zeros_grip = np.zeros(1)
+
+    def controller(r: RebotArm, dt: float) -> None:
+        r.arm.send_mit(pos=zeros_arm, vel=zeros_arm, kp=zeros_arm, kd=zeros_arm, tau=zeros_arm)
+        r.gripper.send_mit(pos=zeros_grip, vel=zeros_grip, kp=zeros_arm, kd=zeros_grip, tau=zeros_grip)
     return controller
 
 
@@ -159,8 +218,6 @@ def main():
     parser.add_argument("hardware_yaml", nargs="?", default=None, help="hardware config file")
     parser.add_argument("--zero", action="store_true",
                         help="set the current pose as zero on startup (overwrites existing zero)")
-    parser.add_argument("--can-timeout-ms", type=int, default=100,
-                        help="motor CAN watchdog in ms (RAM only; 0 disables)")
     args = parser.parse_args()
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -170,6 +227,8 @@ def main():
     print("加载可视化器 / Loading visualizer...")
     viz = Visualizer()
     n_model = get_arm_joint_count(viz.model)
+    dynamics_model = load_dynamics_model()
+    dynamics_data = create_data(dynamics_model)
 
     rebotarm = RebotArm(args.hardware_yaml)
     print(f"使用配置 / Using config: {rebotarm.hardware_yaml}")
@@ -182,30 +241,47 @@ def main():
         if args.zero:
             set_zero_with_progress(rebotarm)
             rebotarm.check_joint_limits()
-        if args.can_timeout_ms is not None:
-            set_can_timeout(rebotarm, args.can_timeout_ms)
+        clear_faults(rebotarm)
 
         n_arm = rebotarm.arm.num_joints
         rebotarm.arm.mode_mit()
         rebotarm.gripper.mode_mit()
         rebotarm.enable_all()
-        rebotarm.start_control_loop(make_free_drive_controller(n_arm))
+        gcomp_controller = make_gcomp_controller(n_arm,dynamics_model,dynamics_data)
+        test_controller = make_test_controller(n_arm)
+        rebotarm.start_control_loop(gcomp_controller)
 
         print("--- 随动模式 / Free-drive mode ---")
         print("手动移动机械臂，MeshCat 实时同步。按 Ctrl+C 退出。")
         print("Move the arm by hand; MeshCat follows. Press Ctrl+C to exit.\n")
 
         status = StatusMonitor(rebotarm)
+        read_timer = ReadTimer("xout")
         period = 1.0 / VIS_RATE_HZ
         while not should_exit:
             t0 = time.time()
-            pos = rebotarm.get_positions(position_source = "output")
+            # 控制循环的每条 MIT 指令都会带回反馈帧，无需再显式请求（节省总线带宽）
+            # Every MIT command in the control loop already returns a feedback
+            # frame, so skip the explicit feedback requests (saves bus bandwidth)
+            t_read = time.perf_counter()
+            try:
+                pos = rebotarm.get_positions(position_source="output", request_feedback=False)
+            except CallError as e:
+                # 超时说明总线饱和：记录后跳过本帧，保持运行
+                # A timeout means the bus is saturated: log it, skip this frame, keep running
+                read_timer.timeout(e)
+                status.check()
+                time.sleep(max(0.0, period - (time.time() - t0)))
+                continue
+            read_timer.record((time.perf_counter() - t_read) * 1e3)
             # print(rebotarm.get_torques())
             q = pad_q_for_model(viz.model,pos , n_model)
             status.check()
             viz.update(q)
             
             pos, rot, _ = compute_fk(viz.model, q)
+            # gtau = compute_generalized_gravity(dynamics_model,pos,dynamics_data)
+            # print(np.sign(rebotarm.get_torques()[:6]*gtau[:6]))
             euler = np.degrees(pin.rpy.matrixToRpy(rot))
             # print(f"\r末端位置 / pos: [{pos[0]:+.4f}, {pos[1]:+.4f}, {pos[2]:+.4f}] m  "
             #       f"姿态 / rpy: [{euler[0]:+7.2f}, {euler[1]:+7.2f}, {euler[2]:+7.2f}] deg",
