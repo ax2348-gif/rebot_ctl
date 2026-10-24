@@ -8,12 +8,17 @@ from reBotArm_control_py.actuator import JointLimitError, RebotArm
 
 
 class FakeMotor:
-    def __init__(self, pos):
+    def __init__(self, pos, timeout_reg=2000):
         self.pos = pos
+        self.timeout_reg = timeout_reg  # Damiao TIMEOUT register (2000 = 100 ms)
         self.request_feedback = Mock()
 
     def get_state(self):
         return None if self.pos is None else SimpleNamespace(pos=self.pos, status_code=0)
+
+    def get_register_u32(self, rid, timeout_ms):
+        assert rid == 9
+        return self.timeout_reg
 
 
 class JointLimitCheckTests(unittest.TestCase):

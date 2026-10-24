@@ -25,6 +25,8 @@ from .rebotarm import (
     JointGroup,
     JointCfg,
     JointLimitError,
+    CanTimeoutError,
+    CAN_TIMEOUT_MS,
     load_cfg,
     load_gravity_compensation_config,
 )
@@ -34,6 +36,8 @@ __all__ = [
     "JointGroup",
     "JointCfg",
     "JointLimitError",
+    "CanTimeoutError",
+    "CAN_TIMEOUT_MS",
     "load_cfg",
     "load_gravity_compensation_config",
 ]

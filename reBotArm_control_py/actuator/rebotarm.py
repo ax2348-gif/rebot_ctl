@@ -145,6 +145,27 @@ def load_joint_limits(urdf_path: str | None) -> Dict[str, tuple[float, float]]:
     return limits
 
 
+# 电机 CAN 通讯看门狗：使能状态下超过该时间未收到 CAN 帧，电机自行失能（进入阻尼）。
+# 该值由 tools/persist_can_timeout.py 写入电机 flash；connect() 会校验，不一致则拒绝连接。
+# Motor CAN watchdog: an enabled motor that receives no CAN frame for this long
+# disables itself (damping). Stored in motor flash by tools/persist_can_timeout.py;
+# connect() verifies it and refuses to continue on a mismatch.
+CAN_TIMEOUT_MS = 100
+DM_RID_TIMEOUT = 9  # Damiao register: TIMEOUT, units of 50 µs
+
+
+def dm_timeout_register_value(timeout_ms: int) -> int:
+    """Damiao TIMEOUT 寄存器值（50 µs 为单位）/ Damiao TIMEOUT register value (50 µs units)."""
+    return timeout_ms * 20
+
+
+class CanTimeoutError(RuntimeError):
+    """电机的 CAN 看门狗未设置为 CAN_TIMEOUT_MS（或无法校验）。
+
+    A motor's CAN watchdog is not set to CAN_TIMEOUT_MS, or cannot be verified.
+    """
+
+
 class JointLimitError(RuntimeError):
     """上电读数超出关节限位（常见原因：单圈编码器上电时多算/少算一圈 2π）。
 
@@ -593,23 +614,56 @@ class RebotArm:
     def connect(self, check_limits: bool = True) -> None:
         """连接总线、注册电机。模式切换需在 connect 后调用。
 
-        默认会检查各关节读数是否在 URDF 限位内，不在则断开并抛出 JointLimitError。
+        始终校验每个电机的 CAN 看门狗为 CAN_TIMEOUT_MS，否则断开并抛出 CanTimeoutError
+        （不可跳过）。默认还会检查各关节读数是否在 URDF 限位内，不在则抛出 JointLimitError；
         仅零点校准脚本应传 check_limits=False（重新设零正是修复手段）。
 
-        By default every joint reading is checked against its URDF limits; on
-        failure the arm is disconnected and JointLimitError is raised. Only
-        zeroing scripts should pass check_limits=False, since re-zeroing is the fix.
+        Always verifies that every motor's CAN watchdog is CAN_TIMEOUT_MS and
+        raises CanTimeoutError otherwise; this check cannot be skipped. By
+        default also checks every joint reading against its URDF limits
+        (JointLimitError); only zeroing scripts should pass check_limits=False,
+        since re-zeroing is the fix. On any failure the arm is disconnected first.
         """
         if self._connected:
             return
         self._setup_motors()
         self._connected = True
-        if check_limits:
-            try:
+        try:
+            self.check_can_timeout()
+            if check_limits:
                 self.check_joint_limits()
-            except Exception:
-                self.disconnect()
-                raise
+        except Exception:
+            self.disconnect()
+            raise
+
+    def check_can_timeout(self) -> None:
+        """读取每个电机的 CAN 看门狗设置，不等于 CAN_TIMEOUT_MS 则抛出 CanTimeoutError。
+
+        Read every motor's CAN watchdog and raise CanTimeoutError unless it is
+        CAN_TIMEOUT_MS. Only Damiao motors can be read back; any other vendor
+        raises too, since its watchdog cannot be verified.
+        """
+        expected = dm_timeout_register_value(CAN_TIMEOUT_MS)
+        problems: List[str] = []
+        for jc in self._all_joints:
+            if jc.vendor != "damiao":
+                problems.append(f"  {jc.name}: vendor {jc.vendor!r}, watchdog cannot be read back")
+                continue
+            try:
+                value = int(self._motor_map[jc.name].get_register_u32(DM_RID_TIMEOUT, 200))
+            except Exception as e:
+                problems.append(f"  {jc.name}: could not read TIMEOUT register ({e})")
+                continue
+            if value != expected:
+                problems.append(f"  {jc.name}: TIMEOUT = {value} ({value / 20:g} ms), "
+                                f"expected {expected} ({CAN_TIMEOUT_MS} ms)")
+        if problems:
+            raise CanTimeoutError(
+                "CAN watchdog check failed; refusing to continue:\n"
+                + "\n".join(problems)
+                + f"\nFix: with the arm powered and disabled, run "
+                  f"tools/persist_can_timeout.py to store {CAN_TIMEOUT_MS} ms in every motor."
+            )
 
     def check_joint_limits(self, timeout: float = 1.0) -> None:
         """读取各关节位置，若无反馈或超出 URDF 限位则抛出 JointLimitError。
@@ -925,8 +979,8 @@ class RebotArm:
             for n in names
         }
 
-    def get_positions(self, position_source: str = "feedback") -> np.ndarray:
-        return self.get_state(position_source=position_source)[0]
+    def get_positions(self, position_source: str = "feedback", request_feedback: bool = True) -> np.ndarray:
+        return self.get_state(request_feedback=request_feedback, position_source=position_source)[0]
 
     def get_velocities(self) -> np.ndarray:
         return self.get_state()[1]
