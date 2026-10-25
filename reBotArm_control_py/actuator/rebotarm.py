@@ -225,6 +225,75 @@ def load_gravity_compensation_config(
 
 
 # --------------------------------------------------------------------------
+# 输出轴位置（xout）读取 — RebotArm 与 JointGroup 共用
+# Output-shaft position (xout) reads, shared by RebotArm and JointGroup
+# --------------------------------------------------------------------------
+
+# Damiao 只读寄存器：输出轴位置 / Damiao read-only register: output shaft position
+DM_RID_XOUT = 81
+POSITION_SOURCES = ("feedback", "output")
+# 等待全部 xout 回复的上限 / Upper bound on waiting for all xout replies
+XOUT_TIMEOUT_S = 0.05
+
+
+def _check_position_source(position_source: str) -> None:
+    if position_source not in POSITION_SOURCES:
+        raise ValueError(
+            f"position_source must be one of {POSITION_SOURCES}, got {position_source!r}"
+        )
+
+
+def _request_xout(motor_map: Dict[str, any], names: List[str]) -> bool:
+    """向各电机发出 xout 读请求（不等待）；旧版 motorbridge 不支持时返回 False。
+
+    Send the xout read request to each motor without waiting. Returns False
+    (and sends nothing) on a motorbridge without the non-blocking API.
+    """
+    if not all(hasattr(motor_map[n], "request_register") for n in names):
+        return False
+    for n in names:
+        motor_map[n].request_register(DM_RID_XOUT)
+    return True
+
+
+def _collect_xout(
+    motor_map: Dict[str, any],
+    ctrls: List[Controller],
+    names: List[str],
+    batched: bool,
+    timeout_s: float,
+) -> Dict[str, float]:
+    """等待 _request_xout 已发请求的新鲜回复；未分批时逐个阻塞读取。
+
+    Await fresh replies to the requests _request_xout sent; a reply to an
+    older request never counts. A motor that hasn't answered within timeout_s
+    raises CallError naming it. Without batching (old motorbridge), fall back
+    to one blocking read per motor (~2.5 ms each).
+    """
+    if not batched:
+        return {n: float(motor_map[n].get_register_f32(DM_RID_XOUT, 500)) for n in names}
+    out: Dict[str, float] = {}
+    deadline = time.monotonic() + timeout_s
+    while True:
+        for name in names:
+            if name not in out:
+                # fresh_only (default): a reply to an older request never counts
+                cached = motor_map[name].get_cached_register_f32(DM_RID_XOUT)
+                if cached is not None:
+                    out[name] = float(cached[0])
+        if len(out) == len(names):
+            return out
+        if time.monotonic() > deadline:
+            missing = ", ".join(n for n in names if n not in out)
+            raise CallError(
+                f"no xout (register {DM_RID_XOUT}) reply within "
+                f"{timeout_s * 1e3:.0f} ms from: {missing}"
+            )
+        for ctrl in ctrls:
+            ctrl.poll_feedback_once()
+
+
+# --------------------------------------------------------------------------
 # NoOpGroup — 无执行器时的空操作桩
 # --------------------------------------------------------------------------
 
@@ -277,7 +346,9 @@ class NoOpGroup:
     def send_vel(self, vel) -> None:
         pass
 
-    def get_positions(self) -> np.ndarray:
+    def get_positions(self, request_feedback: bool = True,
+                      position_source: str = "feedback") -> np.ndarray:
+        _check_position_source(position_source)
         return np.array([], dtype=np.float64)
 
     def get_velocities(self) -> np.ndarray:
@@ -519,7 +590,30 @@ class JointGroup:
                 pass
         self._poll_feedback()
 
-    def get_positions(self, request_feedback: bool = True) -> np.ndarray:
+    XOUT_TIMEOUT_S = XOUT_TIMEOUT_S
+
+    def get_positions(self, request_feedback: bool = True,
+                      position_source: str = "feedback") -> np.ndarray:
+        """本组关节位置 / This group's joint positions.
+
+        position_source 与 RebotArm.get_state() 相同："output" 时本组 Damiao 关节
+        改读寄存器 81（xout，输出轴位置），超时或失败抛出 CallError。
+
+        position_source works as in RebotArm.get_state(): with "output",
+        Damiao joints in this group read register 81 (xout, output-shaft
+        position) instead of the feedback frame; a missing reply (after
+        XOUT_TIMEOUT_S) or failed read raises CallError, never 0 or a stale
+        value. Feedback requests are sent as before either way.
+        """
+        _check_position_source(position_source)
+        xout_names: List[str] = []
+        batched = False
+        if position_source == "output":
+            # 先发 xout 读请求，与反馈请求的往返重叠
+            # Send xout reads first so their round trip overlaps the feedback request's
+            xout_names = [jc.name for jc in self._jcfgs if jc.vendor == "damiao"]
+            batched = _request_xout(self._mm, xout_names)
+
         # 始终发送显式请求帧 + 处理接收队列
         # motorbridge 内部会针对 RS/DM 分别处理
         self._request_feedback()
@@ -539,6 +633,12 @@ class JointGroup:
                     except CallError:
                         pass
                 out.append(0.0)
+        if xout_names:
+            ctrls = [self._cm[v] for v in {jc.vendor for jc in self._jcfgs if jc.name in xout_names}]
+            xout = _collect_xout(self._mm, ctrls, xout_names, batched, self.XOUT_TIMEOUT_S)
+            for i, jc in enumerate(self._jcfgs):
+                if jc.name in xout:
+                    out[i] = xout[jc.name]
         return np.array(out, dtype=np.float64)
 
     def get_velocities(self, request_feedback: bool = True) -> np.ndarray:
@@ -863,11 +963,9 @@ class RebotArm:
 
     # ── 全局状态读取 ───────────────────────────────────────────────────
 
-    # Damiao 只读寄存器：输出轴位置 / Damiao read-only register: output shaft position
-    _DM_RID_XOUT = 81
-    POSITION_SOURCES = ("feedback", "output")
-    # 等待全部 xout 回复的上限 / Upper bound on waiting for all xout replies
-    XOUT_TIMEOUT_S = 0.05
+    _DM_RID_XOUT = DM_RID_XOUT
+    POSITION_SOURCES = POSITION_SOURCES
+    XOUT_TIMEOUT_S = XOUT_TIMEOUT_S
 
     def get_state(
         self,
@@ -902,19 +1000,14 @@ class RebotArm:
             backlash; using it as an observation is fine.
         vel and torq always come from the feedback frame.
         """
-        if position_source not in self.POSITION_SOURCES:
-            raise ValueError(
-                f"position_source must be one of {self.POSITION_SOURCES}, got {position_source!r}"
-            )
+        _check_position_source(position_source)
         xout_names: List[str] = []
+        batched = False
         if position_source == "output":
             # 先发 xout 读请求，与反馈请求的往返重叠
             # Send xout reads first so their round trip overlaps the feedback request's
             xout_names = [jc.name for jc in self._all_joints if jc.vendor == "damiao"]
-            batched = all(hasattr(self._motor_map[n], "request_register") for n in xout_names)
-            if batched:
-                for n in xout_names:
-                    self._motor_map[n].request_register(self._DM_RID_XOUT)
+            batched = _request_xout(self._motor_map, xout_names)
         if request_feedback:
             for m in self._motor_map.values():
                 try:
@@ -938,8 +1031,8 @@ class RebotArm:
                 vel.append(0.0)
                 torq.append(0.0)
         if position_source == "output":
-            xout = (self._collect_xout(xout_names) if batched
-                    else self._read_xout_blocking(xout_names))
+            xout = _collect_xout(self._motor_map, list(self._ctrl_map.values()),
+                                 xout_names, batched, self.XOUT_TIMEOUT_S)
             for i, jc in enumerate(self._all_joints):
                 if jc.name in xout:
                     pos[i] = xout[jc.name]
@@ -948,36 +1041,6 @@ class RebotArm:
             np.array(vel, dtype=np.float64),
             np.array(torq, dtype=np.float64),
         )
-
-    def _collect_xout(self, names: List[str]) -> Dict[str, float]:
-        """等待已发出的 xout 读请求的新鲜回复 / Await fresh replies to xout requests already sent."""
-        out: Dict[str, float] = {}
-        deadline = time.monotonic() + self.XOUT_TIMEOUT_S
-        while True:
-            for name in names:
-                if name not in out:
-                    # fresh_only (default): a reply to an older request never counts
-                    cached = self._motor_map[name].get_cached_register_f32(self._DM_RID_XOUT)
-                    if cached is not None:
-                        out[name] = float(cached[0])
-            if len(out) == len(names):
-                return out
-            if time.monotonic() > deadline:
-                missing = ", ".join(n for n in names if n not in out)
-                raise CallError(
-                    f"no xout (register {self._DM_RID_XOUT}) reply within "
-                    f"{self.XOUT_TIMEOUT_S * 1e3:.0f} ms from: {missing}"
-                )
-            for ctrl in self._ctrl_map.values():
-                ctrl.poll_feedback_once()
-
-    def _read_xout_blocking(self, names: List[str]) -> Dict[str, float]:
-        # 旧版 motorbridge（无 request_register）回退：逐个阻塞读取，约 2.5 ms/电机
-        # Fallback for motorbridge without request_register: one blocking read per motor
-        return {
-            n: float(self._motor_map[n].get_register_f32(self._DM_RID_XOUT, 500))
-            for n in names
-        }
 
     def get_positions(self, position_source: str = "feedback", request_feedback: bool = True) -> np.ndarray:
         return self.get_state(request_feedback=request_feedback, position_source=position_source)[0]

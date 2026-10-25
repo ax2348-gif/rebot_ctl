@@ -117,5 +117,59 @@ class PositionSourceTests(unittest.TestCase):
             robot.get_state(position_source="rotor")
 
 
+class JointGroupPositionSourceTests(unittest.TestCase):
+    make_robot = PositionSourceTests.make_robot
+
+    def test_group_default_is_feedback_and_reads_no_registers(self):
+        robot, motors = self.make_robot()
+        pos = robot.arm.get_positions()
+        np.testing.assert_allclose(pos, 0.1 * np.arange(6))
+        for m in motors:
+            self.assertEqual((m.requests, m.blocking_reads), ([], []))
+
+    def test_arm_group_output_reads_only_its_own_joints(self):
+        robot, motors = self.make_robot()
+        pos = robot.arm.get_positions(position_source="output")
+        np.testing.assert_allclose(pos, 6.0 + np.arange(6))
+        for m in motors[:6]:
+            self.assertEqual(m.requests, [81])
+        self.assertEqual(motors[6].requests, [])  # gripper untouched
+
+    def test_gripper_group_output(self):
+        robot, motors = self.make_robot()
+        np.testing.assert_allclose(robot.gripper.get_positions(position_source="output"), [12.0])
+        self.assertEqual([m.requests for m in motors[:6]], [[]] * 6)
+
+    def test_group_request_feedback_kwarg_still_accepted(self):
+        robot, _ = self.make_robot()
+        pos = robot.arm.get_positions(request_feedback=False, position_source="output")
+        np.testing.assert_allclose(pos, 6.0 + np.arange(6))
+
+    def test_group_missing_reply_raises_naming_joint(self):
+        robot, _ = self.make_robot(xout=lambda i: None if i == 3 else 1.0)
+        with self.assertRaises(CallError) as cm:
+            robot.arm.get_positions(position_source="output")
+        self.assertIn("joint4", str(cm.exception))
+
+    def test_group_falls_back_to_blocking_read_on_old_motorbridge(self):
+        robot, motors = self.make_robot(old=True)
+        np.testing.assert_allclose(robot.arm.get_positions(position_source="output"),
+                                   6.0 + np.arange(6))
+        for m in motors[:6]:
+            self.assertEqual(m.blocking_reads, [81])
+
+    def test_group_unknown_source_rejected(self):
+        robot, _ = self.make_robot()
+        with self.assertRaises(ValueError):
+            robot.arm.get_positions(position_source="rotor")
+
+    def test_noop_group_accepts_position_source(self):
+        from reBotArm_control_py.actuator.rebotarm import NoOpGroup
+        g = NoOpGroup()
+        self.assertEqual(g.get_positions(position_source="output").size, 0)
+        with self.assertRaises(ValueError):
+            g.get_positions(position_source="rotor")
+
+
 if __name__ == "__main__":
     unittest.main()
