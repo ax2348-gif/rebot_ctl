@@ -48,11 +48,14 @@ class ConfigLimitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             joint_limits(cfg)
 
-    def test_connect_check_enforces_config_limit(self):
+    def test_setpoint_limits_vs_connect_check(self):
         robot = RebotArm("rebotarm_dm_safe.yaml")
-        self.assertAlmostEqual(math.degrees(robot._joint_limits["joint1"][0]), -39.0)
-        # -39° - 0.2 rad margin is about -50.5°: -60° must be refused, -45° allowed
-        for deg, ok in ((-45.0, True), (-60.0, False)):
+        self.assertAlmostEqual(math.degrees(robot.setpoint_limits["joint1"][0]), -39.0)
+        urdf = load_joint_limits(load_cfg("rebotarm_dm_safe.yaml")["urdf_path"])
+        self.assertEqual(robot._joint_limits, urdf, "connect() checks the URDF limits only")
+        # -60° is outside the config limit but inside the URDF's: connect() must allow it;
+        # -260° is outside the URDF's (beyond the 0.2 rad margin) and is refused.
+        for deg, ok in ((-60.0, True), (-270.0, False)):
             state = {n: SimpleNamespace(pos=0.0) for n in robot.joint_names}
             state["joint2"] = state["joint3"] = SimpleNamespace(pos=-0.5)
             state["joint1"] = SimpleNamespace(pos=math.radians(deg))

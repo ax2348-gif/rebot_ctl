@@ -28,6 +28,7 @@ from ..actuator.rebotarm import (
     dm_timeout_register_value,
     load_cfg,
     joint_limits,
+    load_joint_limits,
     resolve_channel,
 )
 from ._common import (describe_status, make_controller, optional, parser, print_joint_table,
@@ -54,7 +55,8 @@ def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
     cfg = load_cfg(hw_yaml)
     cfg["channel"] = resolve_channel(cfg, channel)
     joints = cfg["joints"]
-    limits = joint_limits(cfg)
+    urdf_limits = load_joint_limits(cfg.get("urdf_path"))  # what connect() checks
+    limits = joint_limits(cfg)  # adds the config's q limits (setpoints only)
     target = dm_timeout_register_value(CAN_TIMEOUT_MS)
     print(f"Config: {cfg['name']} on {cfg['channel']}, {len(joints)} joints")
 
@@ -71,6 +73,7 @@ def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
 
         rows = {"status": [], "watchdog": [], "position °": [], "limits °": []}
         problems: List[str] = []
+        notes: List[str] = []
         fixes = set()
         for jc in joints:
             if motors[jc.name] is None:
@@ -114,15 +117,21 @@ def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
             if jc.name in limits:
                 lo, hi = limits[jc.name]
                 rows["limits °"].append(f"{math.degrees(lo):+.0f}..{math.degrees(hi):+.0f}")
-                if not lo - LIMIT_MARGIN_RAD <= q <= hi + LIMIT_MARGIN_RAD:
+                ulo, uhi = urdf_limits.get(jc.name, (-math.inf, math.inf))
+                if not ulo - LIMIT_MARGIN_RAD <= q <= uhi + LIMIT_MARGIN_RAD:
                     problems.append(f"{jc.name}: reads {math.degrees(q):+.1f}°, outside its limits")
                     fixes.add("limits")
+                elif not lo <= q <= hi:
+                    notes.append(f"{jc.name}: reads {math.degrees(q):+.1f}°, outside the config's "
+                                 "q limits (setpoints there are refused; nothing else changes)")
             else:
                 rows["limits °"].append("none")
 
         print()
         print_joint_table([jc.name for jc in joints], rows)
         print()
+        for n in notes:
+            print(f"Note: {n}")
         if not problems:
             print(f"OK: every motor answers, has the {CAN_TIMEOUT_MS} ms watchdog stored and "
                   "reads inside its limits.")

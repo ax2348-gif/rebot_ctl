@@ -225,6 +225,9 @@ def joint_limits(cfg: dict) -> Dict[str, tuple[float, float]]:
     ``q_min_deg`` / ``q_max_deg`` in the hardware config are plain joint-space limits on q,
     independent of the URDF; the URDF's own limits still apply too, so the tighter of the
     two wins on each side. Joints with neither are absent.
+
+    Tools that generate setpoints use these to reject illegal targets. Nothing uses them to
+    correct or move a joint, and RebotArm.connect()'s startup check uses only the URDF.
     """
     limits = dict(load_joint_limits(cfg.get("urdf_path")))
     for jc in cfg["joints"]:
@@ -792,7 +795,11 @@ class RebotArm:
         self._all_joints: List[JointCfg] = cfg["joints"]
         self._groups_def: dict = cfg["groups"]
         self._arm_control_mode: str = cfg.get("arm_control_mode", "posvel")
-        self._joint_limits = joint_limits(cfg)
+        # connect() checks readings against the URDF only (its job is catching power-on
+        # encoder wraps); the config's q limits are for rejecting setpoints.
+        self._joint_limits = load_joint_limits(cfg.get("urdf_path"))
+        #: Effective q limits (URDF and config) that setpoints must respect; see joint_limits().
+        self.setpoint_limits = joint_limits(cfg)
 
         self._ctrl_map: Dict[str, Controller] = {}
         self._motor_map: Dict[str, any] = {}

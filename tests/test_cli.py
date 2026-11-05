@@ -1,4 +1,5 @@
 """Exercise the rebot_* command-line tools against fakes (no hardware)."""
+import math
 import contextlib
 import io
 import signal
@@ -128,6 +129,14 @@ class SetupCheckTests(unittest.TestCase):
             code, _ = run(setup_cli.main, [HW, "--channel", dev])
         self.assertEqual(code, 0)
         opened.assert_called_once_with(dev, 921600)
+
+    def test_config_limit_is_a_note_not_a_failure(self):
+        motors = [FakeMotor() for _ in range(7)]
+        motors[0].pos = math.radians(-60)  # joint1: below q_min_deg -39, inside the URDF
+        code, out = self.check(motors)
+        self.assertEqual(code, 0, out)
+        self.assertIn("Note: joint1", out)
+        self.assertIn("setpoints there are refused", out)
 
     def test_out_of_limits_points_to_zero(self):
         motors = [FakeMotor() for _ in range(7)]
