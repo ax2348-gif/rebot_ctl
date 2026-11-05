@@ -31,6 +31,7 @@ class FakeMotor:
     def __init__(self, status=0, watchdog=GOOD_WD, pos=0.0, answers=True):
         self.status, self.watchdog, self.pos, self.answers = status, watchdog, pos, answers
         self.writes, self.stores = [], 0
+        self.fail_reads = 0  # this many register reads time out first
 
     def request_feedback(self):
         pass
@@ -39,6 +40,9 @@ class FakeMotor:
         return SimpleNamespace(status_code=self.status, pos=self.pos) if self.answers else None
 
     def get_register_u32(self, rid, timeout_ms):
+        if self.fail_reads:
+            self.fail_reads -= 1
+            raise RuntimeError(f"register {rid} not received within {timeout_ms}ms")
         return self.watchdog if rid == 9 else 1
 
     def get_register_f32(self, rid, timeout_ms):
@@ -88,6 +92,19 @@ class SetupCheckTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("joint1: no feedback", out)
         self.assertIn("joint5: FAULT overcurrent", out)
+
+    def test_lost_register_reply_is_retried(self):
+        motors = [FakeMotor() for _ in range(7)]
+        motors[0].fail_reads = 1
+        code, out = self.check(motors)
+        self.assertEqual(code, 0, out)
+
+    def test_register_unreadable_after_retries(self):
+        motors = [FakeMotor() for _ in range(7)]
+        motors[0].fail_reads = 10
+        code, out = self.check(motors)
+        self.assertEqual(code, 1)
+        self.assertIn("joint1: could not read the watchdog register in 3 attempts", out)
 
     def test_channel_override(self):
         motors = iter([FakeMotor() for _ in range(7)])

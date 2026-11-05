@@ -96,7 +96,7 @@ def fmt_deg(values) -> str:
 
 
 def print_joint_table(names: List[str], rows: Dict[str, List[str]]) -> None:
-    w = max(9, *(len(n) + 2 for n in names))
+    w = 2 + max(7, *(len(n) for n in names), *(len(c) for cells in rows.values() for c in cells))
     print(f"{'':<14}" + "".join(f"{n:>{w}}" for n in names))
     for label, cells in rows.items():
         print(f"{label:<14}" + "".join(f"{c:>{w}}" for c in cells))

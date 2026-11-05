@@ -34,6 +34,7 @@ from ._common import (describe_status, make_controller, optional, parser, print_
                       wait_for_feedback)
 
 READ_TIMEOUT_MS = 500
+READ_ATTEMPTS = 3
 LIMIT_MARGIN_RAD = RebotArm.LIMIT_MARGIN_RAD
 
 
@@ -92,11 +93,16 @@ def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
             if code >= 0x8:
                 problems.append(f"{jc.name}: {describe_status('damiao', code)}")
 
-            try:
-                wd = int(motors[jc.name].get_register_u32(DM_RID_TIMEOUT, READ_TIMEOUT_MS))
-            except Exception as e:
-                wd = None
-                problems.append(f"{jc.name}: could not read the watchdog register ({e})")
+            wd, err = None, None
+            for _ in range(READ_ATTEMPTS):  # a single reply can be lost right after feedback
+                try:
+                    wd = int(motors[jc.name].get_register_u32(DM_RID_TIMEOUT, READ_TIMEOUT_MS))
+                    break
+                except Exception as e:
+                    err = e
+            if wd is None:
+                problems.append(f"{jc.name}: could not read the watchdog register "
+                                f"in {READ_ATTEMPTS} attempts ({err})")
             rows["watchdog"].append(optional(None if wd is None else wd / 20, "g") +
                                     ("" if wd is None else " ms"))
             if wd is not None and wd != target:
