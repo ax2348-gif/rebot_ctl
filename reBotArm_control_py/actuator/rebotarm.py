@@ -683,12 +683,14 @@ class RebotArm:
         arm.add_group("custom", ["joint1", "joint2"])
     """
 
-    def __init__(self, hw_yaml: str | None = None) -> None:
+    def __init__(self, hw_yaml: str | None = None, channel: str | None = None) -> None:
+        """channel overrides the config's ``channel`` (the serial port or CAN interface
+        differs per machine, e.g. /dev/tty.usbmodem* on macOS, /dev/ttyACM0 on Linux)."""
         self._hw_yaml = _resolve_hw_cfg_path(hw_yaml).name
         cfg = load_cfg(hw_yaml)
 
         self._name: str = cfg["name"]
-        self._channel: str = cfg["channel"]
+        self._channel: str = channel or cfg["channel"]
         self._rate: float = cfg["rate"]
         self._all_joints: List[JointCfg] = cfg["joints"]
         self._groups_def: dict = cfg["groups"]

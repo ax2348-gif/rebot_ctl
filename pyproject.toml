@@ -17,6 +17,12 @@ dependencies = [
     "motorbridge>=0.4.9",
 ]
 
+# Command-line tools, on PATH whenever the venv is active.
+[project.scripts]
+rebot_setup = "reBotArm_control_py.cli.setup:main"
+rebot_zero = "reBotArm_control_py.cli.zero:main"
+rebot_vis = "reBotArm_control_py.cli.vis:main"
+
 # Only the Python package is installed. config/ and urdf/ are read relative to the repo
 # (reBotArm_control_py/actuator/rebotarm.py), so install it editable: pip install -e .
 [tool.setuptools.packages.find]

@@ -14,3 +14,19 @@ For complete usage instructions, please refer to the official wiki:
 
 - **DM Version (Damiao Motors)**: [https://wiki.seeedstudio.com/rebot_arm_b601_dm_pinocchio_meshcat/](https://wiki.seeedstudio.com/rebot_arm_b601_dm_pinocchio_meshcat/)
 - **RS Version (RobStride Motors)**: [https://wiki.seeedstudio.com/rebot_arm_b601_rs_pinocchio_meshcat/](https://wiki.seeedstudio.com/rebot_arm_b601_rs_pinocchio_meshcat/)
+
+## Command-line tools
+
+Installing the package (`pip install -e .`; keep it editable, it reads `config/` and `urdf/`
+from this repo) puts these on `PATH`:
+
+| Tool | What it does | Moves the arm? |
+|---|---|---|
+| `rebot_setup` | Read-only check: every motor answers, has the 100 ms CAN watchdog stored, and reads inside its joint limits. `--store-watchdog` writes the watchdog to motor flash (power-cycle first; asks you to type `STORE`). | no |
+| `rebot_zero` | Sets the current pose as every joint's zero (asks you to type `ZERO`), then re-checks the joint limits. Motors stay disabled. | no |
+| `rebot_vis` | All joints slack (MIT, kp = kd = tau = 0) with the live pose in MeshCat, served on every network interface; the addresses are printed. Support the arm: it does not hold itself up. Ctrl+C disables the motors. | enables, zero torque |
+
+Each takes an optional hardware config (default: `hardware_yaml` in `config/rebotarm.yaml`)
+and `--channel` to override the config's serial port or CAN interface for this machine.
+First-time order: `rebot_setup` (and `--store-watchdog` if it says so), `rebot_zero` with the
+arm in its zero pose, then `rebot_vis`.
