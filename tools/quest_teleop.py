@@ -7,6 +7,13 @@
     - 握持期间: IK 求解目标，关节指令每步限幅后下发
     - 松开 / 断流 / 失焦 / 读数失败: 立即 disable_all()（机械臂失去力矩，会在重力下落下）
 
+夹爪 / Gripper — independent of the clutch, same Y/X enable as the base (rev_ctl
+examples/quest_teleop.py), so with quest_teleop.sh one press serves both:
+    - Y (left controller): enable; the gripper follows the --hand trigger (0 = open).
+    - X: disable; the gripper holds its last command (a grasp is kept).
+    - 断流 / 失焦 / 手柄无效 / 离合松开: also stop following but keep holding.
+    - Only Ctrl-C (disconnect) releases it.
+
 可视化 (红 X / 绿 Y / 蓝 Z): 实机姿态；base、end_link（小）、ee = 实测 TCP；
 握持时另显示 anchor（锚点）与 target（离合目标）。
 
@@ -75,14 +82,17 @@ def main():
         rebotarm.disable_all()
         enabled = False
         q_cmd = np.zeros(n)
-        print(f"连接 Quest {args.host}:{args.port}，{args.hand} 手握持键离合（松开即失能）。Ctrl-C 退出。")
+        gripper_enabled = False   # Y 使能 / X 停用，与底盘相同；与离合无关
+        gripper_cmd = None        # 最近一次夹爪指令；首次使能后每帧重发（看门狗 100 ms），保持夹持
+        print(f"连接 Quest {args.host}:{args.port}，{args.hand} 手握持键离合；Y/X 使能/停用夹爪。Ctrl-C 退出。")
 
         while True:
             t0 = time.monotonic()
+            quest = stream.fresh()   # 夹爪只看 Quest 输入，不受电机读数失败影响
             try:
                 q_meas = pad_q_for_model(model, rebotarm.arm.get_positions(position_source="output"), n)
                 tcp = compute_fk(model, q_meas, "tcp")[:2]
-                sample = stream.fresh()
+                sample = quest
             except CallError:   # 读数失败：本帧视为无效输入
                 q_meas, tcp, sample = None, None, None
             target = clutch.update(sample, args.hand, tcp)
@@ -90,16 +100,15 @@ def main():
                 clutch.state = "电机读数失败"   # 与 Quest 断流区分：检查电机供电 / CAN 连线
 
             if target is None:
-                rebotarm.arm.send_mit(q_cmd, tau=compute_generalized_gravity(model, q_meas, data)[:n])
-                rebotarm.gripper.send_mit(np.array([GRIPPER_OPEN_RAD]))
+                if q_meas is not None:   # 读数失败时跳过一帧（重力项需要实测姿态），不让脚本崩溃松开夹爪
+                    rebotarm.arm.send_mit(q_cmd, tau=compute_generalized_gravity(model, q_meas, data)[:n])
 
                 if enabled:
                     # rebotarm.disable_all()
                     enabled = False
             else:
                 if not enabled:
-                    for g in groups:
-                        g.enable()
+                    rebotarm.arm.enable()   # 夹爪由 Y 单独使能
                     q_cmd = q_meas[:n].copy()   # 从实测姿态开始，避免跳变
                     enabled = True
                 result = solve_ik(model, data, frame_id, pin.SE3(target[1], target[0]),
@@ -108,9 +117,24 @@ def main():
                 if np.linalg.norm(result.q-q_cmd)>0.0001:
                     print("clipped")
                 rebotarm.arm.send_mit(q_cmd, tau=compute_generalized_gravity(model, q_meas, data)[:n])
-                if GRIPPER_OPEN_RAD is not None:
-                    trigger = sample["control_intent"]["hands"][args.hand]["gripper"]
-                    rebotarm.gripper.send_mit(np.array([GRIPPER_OPEN_RAD * (1 - trigger)]))
+
+            # 夹爪：Y 使能跟随扳机，X 停用；无效输入只停止跟随，仍保持最近指令
+            if GRIPPER_OPEN_RAD is not None:
+                hands = quest and quest.get("hands")
+                if not (hands and quest["input_focused"] and hands["left"]["active"]
+                        and hands[args.hand]["active"]):
+                    gripper_enabled = False
+                elif hands["left"]["buttons"]["primary"]:      # X
+                    gripper_enabled = False
+                elif hands["left"]["buttons"]["secondary"]:    # Y
+                    if gripper_cmd is None:
+                        rebotarm.gripper.enable()
+                    gripper_enabled = True
+                if gripper_enabled:
+                    trigger = min(1.0, max(0.0, hands[args.hand]["trigger"]))
+                    gripper_cmd = GRIPPER_OPEN_RAD * (1 - trigger)
+                if gripper_cmd is not None:
+                    rebotarm.gripper.send_mit(np.array([gripper_cmd]))
 
             # 可视化：实机姿态 + 坐标系
             if q_meas is not None:
@@ -124,7 +148,8 @@ def main():
                 show_frame(viz, "frames/target", *target)
 
             err = np.linalg.norm(target[0] - tcp[0]) * 1000 if enabled else 0.0
-            print(f"\r[{clutch.state:4}] {'使能' if enabled else '失能'} 位置误差={err:5.1f}mm   ",
+            gripper_state = "跟随" if gripper_enabled else ("保持" if gripper_cmd is not None else "未用")
+            print(f"\r[{clutch.state:4}] {'使能' if enabled else '失能'} 位置误差={err:5.1f}mm 夹爪={gripper_state}   ",
                   end="", flush=True)
             time.sleep(max(0.0, 1 / RATE_HZ - (time.monotonic() - t0)))
     except KeyboardInterrupt:
