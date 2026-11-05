@@ -48,7 +48,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, signal_handler)
 
     print(f"连接到 {CHANNEL} ... / Connecting to {CHANNEL} ...")
-    if CHANNEL.startswith("/dev/tty"):
+    if CHANNEL.startswith("/dev/"):  # any device path is the serial bridge; CAN interfaces are bare names (can0)
         ctrl = Controller.from_dm_serial(CHANNEL, 921600)
     else:
         ctrl = Controller(CHANNEL)

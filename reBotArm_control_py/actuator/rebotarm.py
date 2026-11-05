@@ -830,7 +830,7 @@ class RebotArm:
             )
 
     def _make_controller(self, vendor: str) -> Controller:
-        if self._channel.startswith("/dev/tty"):
+        if self._channel.startswith("/dev/"):  # any device path is the serial bridge; CAN interfaces are bare names (can0)
             return Controller.from_dm_serial(self._channel, 921600)
         return Controller(self._channel)
 

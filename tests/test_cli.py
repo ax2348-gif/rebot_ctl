@@ -99,6 +99,17 @@ class SetupCheckTests(unittest.TestCase):
         opened.assert_called_once_with("/dev/ttyACM0", 921600)
         self.assertIn("on /dev/ttyACM0", out)
 
+    def test_by_id_path_uses_serial_bridge(self):
+        # Stable udev paths (/dev/serial/by-id/...) are serial ports too, not CAN interfaces.
+        motors = iter([FakeMotor() for _ in range(7)])
+        ctrl = Mock()
+        ctrl.add_damiao_motor.side_effect = lambda *a: next(motors)
+        dev = "/dev/serial/by-id/usb-HDSC_CDC_Device_00000000050C-if00"
+        with patch("motorbridge.Controller.from_dm_serial", return_value=ctrl) as opened:
+            code, _ = run(setup_cli.main, [HW, "--channel", dev])
+        self.assertEqual(code, 0)
+        opened.assert_called_once_with(dev, 921600)
+
     def test_out_of_limits_points_to_zero(self):
         motors = [FakeMotor() for _ in range(7)]
         motors[1].pos = 7.0  # far outside any joint limit

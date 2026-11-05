@@ -49,7 +49,7 @@ def confirm(prompt: str, word: str) -> bool:
 
 def make_controller(channel: str) -> Controller:
     # Same transport selection as RebotArm._make_controller
-    if channel.startswith("/dev/tty"):
+    if channel.startswith("/dev/"):  # any device path is the serial bridge; CAN interfaces are bare names (can0)
         return Controller.from_dm_serial(channel, 921600)
     return Controller(channel)
 
