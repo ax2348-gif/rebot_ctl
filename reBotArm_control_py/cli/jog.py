@@ -20,9 +20,11 @@ Safety design:
     config's q limits (a step that brings a joint back towards its range is allowed), and
     the end effector must stay above --z-min at the target and halfway there;
   - while running, the control loop stops on: a motor fault or any motor no longer
-    ENABLED, a failed send, feedback older than 0.15 s (every motor is polled for its
-    output-shaft position, whose replies carry their age), a joint outside its URDF
-    limits, a tracking error above --tracking-limit, or any exception;
+    ENABLED, a failed send, a motor not answering for 0.15 s (every motor is polled for
+    its output-shaft position, whose replies carry their age; this proves the bus and the
+    motor answer, though not that each cached feedback value is new, as get_state() has no
+    timestamp), a joint outside its URDF limits, a tracking error above --tracking-limit,
+    or any exception;
   - stopping never moves the arm: Ctrl+C (also SIGTERM, SIGHUP, SIGQUIT, Ctrl+Z), q, Esc,
     a fault or an error stops all commands immediately (the 100 ms motor watchdog then
     disables the motors even if this process hangs), then disables them explicitly. A
@@ -55,7 +57,6 @@ MAX_CART_SPEED = 0.10       # m/s
 MAX_JOINT_SPEED = 1.0       # rad/s
 MAX_JOINT_ACCEL = 3.0       # rad/s²
 MAX_ARM_KP = 30.0           # refuse configs stiffer than this (rebotarm_dm.yaml has 120)
-MAX_ARM_KD = 5.0
 MAX_GRIPPER_KP = 30.0
 DAMIAO_KD_MAX = 5.0         # the MIT frame cannot carry more; larger configured values clamp
 
@@ -208,15 +209,16 @@ class JogController:
             self.vmax = min(self.joint_speed, max(1e-6, vmax))
 
     def hold(self) -> None:
-        """Stop where the current speed allows: the goal becomes the braking point."""
+        """Stop where the current velocity allows: the goal becomes the braking point
+        (constant deceleration along the current velocity)."""
         with self._lock:
-            e = self.q_goal - self.q_set
-            dist = float(np.max(np.abs(e)))
-            if dist < 1e-12 or self.speed <= 0.0:
+            v = self.qd_set
+            speed = float(np.max(np.abs(v)))
+            if speed <= 0.0:
                 self.q_goal = self.q_set.copy()
                 return
-            brake = min(dist, self.speed ** 2 / (2.0 * self.joint_accel))
-            self.q_goal = self.q_set + e / dist * brake
+            brake = v * (speed / (2.0 * self.joint_accel))  # v·t/2 with t = speed / a
+            self.q_goal = self.q_set + brake
 
     # -- control loop ------------------------------------------------------
 
@@ -317,32 +319,47 @@ class JogController:
                                      float(self.gkd_cfg[i] * ramp), 0.0)
 
     def _follow(self, dt: float) -> None:
-        """Advance q_set towards q_goal (lock held). Straight joint-space line; the fastest
-        joint moves at ``speed``, which accelerates/decelerates at joint_accel and never
-        exceeds vmax or the speed from which it can still stop at the goal."""
+        """Advance q_set towards q_goal (lock held).
+
+        The desired velocity points straight at the goal (fastest joint at the speed from
+        which it can still stop there, one tick of travel included: s²/2a + s·dt = dist,
+        capped at vmax). The actual velocity *vector* moves towards it by at most
+        joint_accel·dt per joint per tick, so reversing or turning decelerates and
+        re-accelerates instead of flipping the velocity. While turning, the setpoint stays
+        between the previous and the new goal (both checked), and since the previous move
+        could always stop at its own goal, braking never carries it past that goal either.
+        """
+        a = self.joint_accel
         e = self.q_goal - self.q_set
         dist = float(np.max(np.abs(e)))
-        if dist < 1e-9:
+        v = self.qd_set
+        if dist < 1e-9 and float(np.max(np.abs(v))) <= a * dt + 1e-12:
             self.q_set = self.q_goal.copy()
             self.speed, self.qd_set = 0.0, np.zeros_like(self.q_set)
             return
-        a = self.joint_accel
-        # Fastest speed from which it can still stop at the goal, one tick of travel
-        # included (s²/2a + s·dt = dist); speed never changes by more than a·dt per tick.
-        stop_speed = a * (-dt + math.sqrt(dt * dt + 2.0 * dist / a)) if dt > 0 else math.sqrt(2.0 * a * dist)
-        target = min(self.vmax, stop_speed)
-        if target > self.speed:
-            self.speed = min(target, self.speed + a * dt)
+        def stop_speed(d):
+            return a * (-dt + np.sqrt(dt * dt + 2.0 * d / a)) if dt > 0 else np.sqrt(2.0 * a * d)
+
+        if dist > 1e-12:
+            v_des = e / dist * min(self.vmax, float(stop_speed(dist)))
+            # Each joint must also be able to stop at its own goal coordinate, or a joint
+            # with little distance left (e.g. after a turn) would overshoot it.
+            cap = stop_speed(np.abs(e))
+            v_des = np.clip(v_des, -cap, cap)
         else:
-            self.speed = max(target, self.speed - a * dt)
-        step = self.speed * dt
-        if step >= dist:
+            v_des = np.zeros_like(v)
+        # Per joint (not by scaling the whole vector): otherwise a joint that must change
+        # a lot, e.g. one reversing, would starve the others of braking and they'd overshoot.
+        v = v + np.clip(v_des - v, -a * dt, a * dt)
+        step = v * dt
+        if float(np.dot(step, e)) > 0.0 and dist <= float(np.max(np.abs(step))):
+            # Arriving this tick (only at low speed, given the stopping speed above).
             self.q_set = self.q_goal.copy()
             self.speed, self.qd_set = 0.0, np.zeros_like(self.q_set)
             return
-        direction = e / dist
-        self.q_set = self.q_set + direction * step
-        self.qd_set = direction * self.speed
+        self.q_set = self.q_set + step
+        self.qd_set = v
+        self.speed = float(np.max(np.abs(v)))
 
 
 # --------------------------------------------------------------------------- moves
@@ -457,10 +474,10 @@ class Keyboard:
 
 
 def _check_gains(arm: RebotArm) -> Optional[str]:
-    kp, kd = np.asarray(arm.arm._mit_kp), np.asarray(arm.arm._mit_kd)
+    kp = np.asarray(arm.arm._mit_kp)
     gkp = np.asarray(getattr(arm.gripper, "_mit_kp", []))
-    if np.any(kp > MAX_ARM_KP) or np.any(np.minimum(kd, DAMIAO_KD_MAX) > MAX_ARM_KD) \
-            or np.any(gkp > MAX_GRIPPER_KP):
+    # kd needs no ceiling of its own: the MIT frame caps it at DAMIAO_KD_MAX.
+    if np.any(kp > MAX_ARM_KP) or np.any(gkp > MAX_GRIPPER_KP):
         return (f"the config's gains (arm kp {kp.tolist()}, gripper kp {gkp.tolist()}) exceed "
                 f"rebot_jog's ceilings (arm kp ≤ {MAX_ARM_KP:g}, gripper kp ≤ {MAX_GRIPPER_KP:g}); "
                 f"use a safe config such as {DEFAULT_HW}")

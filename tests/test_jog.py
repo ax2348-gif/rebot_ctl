@@ -334,6 +334,46 @@ class ControllerTests(unittest.TestCase):
         self.assertLessEqual(amax_seen, 1.0 + 0.05)
         self.assertTrue(np.allclose(ctrl.snapshot()[0], ctrl.snapshot()[1]), "reached the goal")
 
+    def run_and_measure(self, arm, ctrl, clock, ticks):
+        """Max per-joint velocity change per tick (rad/s²) and the setpoints visited."""
+        prev_v, worst, qs = ctrl.qd_set.copy(), 0.0, []
+        for _ in range(ticks):
+            tick(arm, ctrl, clock)
+            v = ctrl.qd_set.copy()
+            worst = max(worst, float(np.max(np.abs(v - prev_v))) / 0.005)
+            prev_v = v
+            qs.append(ctrl.snapshot()[0])
+        return worst, np.array(qs)
+
+    def test_reversing_mid_move_stays_acceleration_limited(self):
+        """The re-review's N1: w w s flipped the velocity in one tick (45 rad/s²)."""
+        arm, estop, clock, ctrl = make_ctrl(joint_speed=0.3, joint_accel=1.0)
+        enable_and_ramp(arm, ctrl, clock)
+        g1 = Q0 + np.array([0.0, 0.0, 0.3, 0.0, 0.0, 0.0])
+        ctrl.set_goal(g1, vmax=0.3)
+        a1, _ = self.run_and_measure(arm, ctrl, clock, 120)  # up to speed
+        self.assertGreater(ctrl.speed, 0.2)
+        ctrl.set_goal(Q0 - np.array([0.0, 0.0, 0.1, 0.0, 0.0, 0.0]), vmax=0.3)  # reverse
+        a2, qs = self.run_and_measure(arm, ctrl, clock, 800)
+        self.assertLessEqual(max(a1, a2), 1.0 + 1e-6)
+        self.assertLessEqual(float(np.max(qs[:, 2])), g1[2] + 1e-9, "never past the old goal")
+        self.assertAlmostEqual(ctrl.snapshot()[0][2], Q0[2] - 0.1, places=6)
+
+    def test_turning_mid_move_stays_acceleration_limited(self):
+        arm, estop, clock, ctrl = make_ctrl(joint_speed=1.0, joint_accel=1.0)
+        enable_and_ramp(arm, ctrl, clock)
+        g1 = Q0 + np.array([0.0, 0.0, 0.6, 0.0, 0.0, 0.0])
+        ctrl.set_goal(g1, vmax=1.0)
+        self.run_and_measure(arm, ctrl, clock, 120)
+        g2 = ctrl.snapshot()[0] + np.array([0.0, 0.3, 0.0, 0.0, 0.0, 0.0])  # turn
+        ctrl.set_goal(g2, vmax=1.0)
+        a, qs = self.run_and_measure(arm, ctrl, clock, 1500)
+        self.assertLessEqual(a, 1.0 + 1e-6)
+        lo = np.minimum(np.minimum(Q0, g1), g2) - 1e-9
+        hi = np.maximum(np.maximum(Q0, g1), g2) + 1e-9
+        self.assertTrue(np.all((qs >= lo) & (qs <= hi)), "stays inside the checked box")
+        self.assertTrue(np.allclose(ctrl.snapshot()[0], g2, atol=1e-6))
+
     def test_hold_decelerates(self):
         arm, estop, clock, ctrl = make_ctrl()
         enable_and_ramp(arm, ctrl, clock)
@@ -562,13 +602,25 @@ class MainTests(unittest.TestCase):
         self.assertIn("stopped by user", out)
 
     def test_real_ctrl_c_while_running_stops_commands(self):
+        """The trip alone must stop commands: count sends while the control thread is
+        still running (disable_all is made slow, and runs before disconnect joins it)."""
         arm = SimArm()
+        during = {}
+        real_disable = arm.disable_all
+
+        def slow_disable():
+            alive = arm._thread is not None and arm._thread.is_alive()
+            before = arm._motor_map["joint1"].sends
+            time.sleep(0.2)
+            during["alive"], during["sends"] = alive, arm._motor_map["joint1"].sends - before
+            real_disable()
+
+        arm.disable_all = slow_disable
         code, out = self.run_main(arm, keys=[(1.3, "w"), (1.5, "^C")])
         self.assertEqual(code, 1)
         self.assertRegex(out, r"Stopping \((SIGINT received|interrupted)\)")
-        sends = arm._motor_map["joint1"].sends
-        time.sleep(0.05)
-        self.assertEqual(arm._motor_map["joint1"].sends, sends, "no commands after Ctrl+C")
+        self.assertTrue(during["alive"], "the control thread was still running")
+        self.assertEqual(during["sends"], 0, "no commands after Ctrl+C, before any disable")
         self.assertEqual(arm.calls[-2:], ["disable_all", "disconnect"])
 
     def test_pose_changed_at_the_prompt_is_held_not_undone(self):
