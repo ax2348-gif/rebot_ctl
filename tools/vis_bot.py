@@ -39,8 +39,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from motorbridge import CallError
 from reBotArm_control_py.actuator import RebotArm
 from reBotArm_control_py.kinematics import compute_fk, get_arm_joint_count, pad_q_for_model
-from reBotArm_control_py.dynamics import compute_generalized_gravity, load_dynamics_model
+from reBotArm_control_py.dynamics import compute_generalized_gravity, load_dynamics_model, compute_coriolis_matrix, compute_mass_matrix
 from reBotArm_control_py.dynamics.robot_model import create_data
+from reBotArm_control_py.kinematics.robot_model import get_end_effector_frame_id
+from reBotArm_control_py.kinematics import pad_q_for_model
+
 from example.sim.visualizer import Visualizer
 
 # 可视化/打印刷新频率 / Visualization & print refresh rate
@@ -182,23 +185,59 @@ def make_test_controller(n_arm: int):
         r.gripper.send_mit(pos=zeros_grip, vel=zeros_grip, kp=kp_grip, kd=zeros_grip, tau=zeros_grip)
     return controller
 
-def make_gcomp_controller(n_arm: int, model,data):
-    # 随动模式：MIT 零刚度，机械臂可自由手动移动
-    # Free-drive mode: MIT zero stiffness, arm can be freely moved by hand
+
+pos_arm = None
+
+def make_comp_controller(n_arm: int, model,data):
     zeros_arm = np.zeros(n_arm)
     ones_arm = np.ones(n_arm)
+    pos_arm = zeros_arm
+
     zeros_grip = np.zeros(1)
-    kp_arm = zeros_arm #ones_arm*120.0
-    kd_arm = ones_arm*0.07
+    kp_arm = zeros_arm #None#ones_arm*2.0
+    kd_arm = zeros_arm#None#ones_arm*0.1
+
     kp_grip = np.ones(1)*0.0
 
+    RF = pin.LOCAL_WORLD_ALIGNED
+    fid = get_end_effector_frame_id(model)
+    def compute_qdd(model,q,v,data,xdd_des = np.zeros(6)):
+        pin.computeJointJacobians(model, data, q)
+        pin.forwardKinematics(model, data, q, v, np.zeros(model.nv))
+        pin.updateFramePlacements(model, data)
+
+        J        = pin.getFrameJacobian(model, data, fid, RF)                       # 6 x nv
+        Jdot_qd  = pin.getFrameClassicalAcceleration(model, data, fid, RF).vector   # 6
+
+        qdd = np.linalg.pinv(J) @ (xdd_des - Jdot_qd)
+        return qdd
+    
     def controller(r: RebotArm, dt: float) -> None:
-        pos = r.get_positions(position_source="output",request_feedback=False)
-        gtau = compute_generalized_gravity(model,pos,data)
-        gtau = np.clip(gtau, -20,20)*0.87
-        r.arm.send_mit(pos=zeros_arm, vel=zeros_arm, kp=kp_arm, kd=kd_arm, tau=gtau[:6])
+        pos = r.get_positions(position_source="output",request_feedback=True)
+        pos,vel,torque = r.get_state(request_feedback=False,position_source="output")
+        # pvel = np.zeros([8])
+        # pvel[:6] = vel[:6]
+        # cmat = compute_coriolis_matrix(model,pos,pvel,data)[:6,:6]
+        # mmat = compute_mass_matrix(model,pos,data)
+        
+        # ctau = cmat @ vel[:6]*0.9
+        gtau = compute_generalized_gravity(model,pos,data)[:6]
+        # xtau = mmat @ compute_qdd(model,pad_q_for_model(model,pos,6),pvel,create_data(model))
+        # xtau = np.clip(xtau[:6],-20,20)
+
+        gtau = np.clip(gtau, -20,20)*0.89
+        # ctau = np.clip(ctau,-5,5) # this will make the robot joints try to rotate at contant velocity when disturbed.
+
+        # print(np.max(np.abs(xtau)))
+        tau = gtau
+        # tau *= 0
+        r.arm.send_mit(pos=pos_arm, vel=zeros_arm, kp=kp_arm, kd=kd_arm, tau=tau)
         r.gripper.send_mit(pos=zeros_grip, vel=zeros_grip, kp=kp_grip, kd=zeros_grip, tau=zeros_grip)
+        
     return controller
+
+
+
 
 def make_free_drive_controller(n_arm: int):
     # 随动模式：MIT 零刚度，机械臂可自由手动移动
@@ -247,7 +286,7 @@ def main():
         rebotarm.arm.mode_mit()
         rebotarm.gripper.mode_mit()
         rebotarm.enable_all()
-        gcomp_controller = make_gcomp_controller(n_arm,dynamics_model,dynamics_data)
+        gcomp_controller = make_comp_controller(n_arm,dynamics_model,dynamics_data)
         test_controller = make_test_controller(n_arm)
         rebotarm.start_control_loop(gcomp_controller)
 
@@ -265,6 +304,15 @@ def main():
             # frame, so skip the explicit feedback requests (saves bus bandwidth)
             t_read = time.perf_counter()
             try:
+                line = input("> ").split("#", 1)[0].strip()
+                if not line:
+                    raise
+            except (EOFError, KeyboardInterrupt):
+                break
+
+
+            
+            try:
                 pos = rebotarm.get_positions(position_source="output", request_feedback=False)
             except CallError as e:
                 # 超时说明总线饱和：记录后跳过本帧，保持运行
@@ -278,8 +326,9 @@ def main():
             q = pad_q_for_model(viz.model,pos , n_model)
             status.check()
             viz.update(q)
-            
+            print(pos)
             pos, rot, _ = compute_fk(viz.model, q)
+
             # gtau = compute_generalized_gravity(dynamics_model,pos,dynamics_data)
             # print(np.sign(rebotarm.get_torques()[:6]*gtau[:6]))
             euler = np.degrees(pin.rpy.matrixToRpy(rot))

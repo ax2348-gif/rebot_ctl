@@ -16,7 +16,7 @@ end_effector_frame: "end_link"
 # Default arm control mode (only affects RebotArmEndPose examples 7 & 8; overridden by explicit arm_control_mode argument)
 arm_control_mode: "posvel"
 
-channel: /dev/ttyACM0
+channel: /dev/tty.usbmodem00000000050C1
 rate: 500
 
 groups:
