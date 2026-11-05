@@ -22,3 +22,6 @@ __pycache__/
 # pyproject.toml
 
 
+
+# editable installs (pip install -e .)
+*.egg-info/
