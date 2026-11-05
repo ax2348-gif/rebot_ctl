@@ -210,15 +210,10 @@ class JogController:
 
     def hold(self) -> None:
         """Stop where the current velocity allows: the goal becomes the braking point
-        (constant deceleration along the current velocity)."""
+        (each joint decelerating at the accel limit, so none goes further than it must)."""
         with self._lock:
             v = self.qd_set
-            speed = float(np.max(np.abs(v)))
-            if speed <= 0.0:
-                self.q_goal = self.q_set.copy()
-                return
-            brake = v * (speed / (2.0 * self.joint_accel))  # v·t/2 with t = speed / a
-            self.q_goal = self.q_set + brake
+            self.q_goal = self.q_set + v * np.abs(v) / (2.0 * self.joint_accel)
 
     # -- control loop ------------------------------------------------------
 
@@ -352,8 +347,10 @@ class JogController:
         # a lot, e.g. one reversing, would starve the others of braking and they'd overshoot.
         v = v + np.clip(v_des - v, -a * dt, a * dt)
         step = v * dt
-        if float(np.dot(step, e)) > 0.0 and dist <= float(np.max(np.abs(step))):
-            # Arriving this tick (only at low speed, given the stopping speed above).
+        if (float(np.dot(step, e)) > 0.0 and dist <= float(np.max(np.abs(step)))
+                and float(np.max(np.abs(v))) <= a * dt + 1e-12):
+            # Arriving this tick, slow enough that stopping dead is within the accel limit.
+            # (A goal that lands just ahead of a fast setpoint is overshot and come back to.)
             self.q_set = self.q_goal.copy()
             self.speed, self.qd_set = 0.0, np.zeros_like(self.q_set)
             return

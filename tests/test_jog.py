@@ -374,6 +374,37 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(np.all((qs >= lo) & (qs <= hi)), "stays inside the checked box")
         self.assertTrue(np.allclose(ctrl.snapshot()[0], g2, atol=1e-6))
 
+    def test_goal_just_ahead_of_fast_setpoint_is_not_a_dead_stop(self):
+        """Re-review: a goal inside one tick of travel snapped qd 1 rad/s -> 0 in a tick."""
+        arm, estop, clock, ctrl = make_ctrl(joint_speed=1.0, joint_accel=3.0)
+        enable_and_ramp(arm, ctrl, clock)
+        ctrl.set_goal(Q0 + np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0]), vmax=1.0)
+        self.run_and_measure(arm, ctrl, clock, 100)
+        self.assertGreater(ctrl.speed, 0.9)
+        ctrl.set_goal(ctrl.snapshot()[0] + 0.8 * ctrl.qd_set * 0.005, vmax=1.0)
+        a, _ = self.run_and_measure(arm, ctrl, clock, 400)
+        self.assertLessEqual(a, 3.0 + 1e-6)
+        self.assertEqual(ctrl.speed, 0.0)
+
+    def test_hold_after_turn_stays_inside_the_checked_box(self):
+        """Re-review: braking every joint by the fastest one's distance overshot a slow joint."""
+        dt = 0.005
+        worst = -1.0
+        for k in range(0, 300, 5):  # hold at many points through the turn
+            arm, estop, clock, ctrl = make_ctrl(joint_speed=1.0, joint_accel=1.0)
+            enable_and_ramp(arm, ctrl, clock)
+            ctrl.set_goal(Q0 + np.array([0.0, 0.0, 0.6, 0.0, 0.0, 0.0]), vmax=0.5)
+            self.run_and_measure(arm, ctrl, clock, 120)  # joint 3 at 0.5 rad/s
+            v = ctrl.qd_set[2]
+            g2 = ctrl.snapshot()[0] + np.array([0.0, 0.3, v * v / 2.0 + v * dt, 0.0, 0.0, 0.0])
+            ctrl.set_goal(g2, vmax=1.0)  # turn: joint 3 must stop right at its goal
+            self.run_and_measure(arm, ctrl, clock, k)
+            ctrl.hold()
+            _, qs = self.run_and_measure(arm, ctrl, clock, 600)
+            worst = max(worst, float(np.max(qs[:, 2])) - g2[2])
+            self.assertEqual(ctrl.speed, 0.0)
+        self.assertLessEqual(worst, 1e-9, "hold never passes the checked goal")
+
     def test_hold_decelerates(self):
         arm, estop, clock, ctrl = make_ctrl()
         enable_and_ramp(arm, ctrl, clock)
