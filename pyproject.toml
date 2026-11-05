@@ -1,9 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "rebotarm-control-py"
 version = "0.1.0"
 description = "Control python for reBotArm"
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
+requires-python = ">=3.10"
 dependencies = [
     "meshcat>=0.3.2",
     "pin>=3.9.0",
@@ -12,3 +16,8 @@ dependencies = [
     "matplotlib>=3.10.0",
     "motorbridge>=0.4.9",
 ]
+
+# Only the Python package is installed. config/ and urdf/ are read relative to the repo
+# (reBotArm_control_py/actuator/rebotarm.py), so install it editable: pip install -e .
+[tool.setuptools.packages.find]
+include = ["reBotArm_control_py*"]
