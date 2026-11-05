@@ -41,7 +41,7 @@ joints:
     # Optional joint-space limits on q (degrees), independent of the URDF; the URDF's own
     # limits still apply as well. RebotArm refuses position setpoints outside them (startup checks
     # and slack tools ignore them; nothing is ever corrected). -39°: bounds clockwise yaw.
-    q_min_deg: -39.0
+    q_min_deg: -36.0
     MIT:
       kp: 72.0
       kd: 8.0

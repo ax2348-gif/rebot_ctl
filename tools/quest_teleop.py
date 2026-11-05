@@ -41,7 +41,7 @@ from example.sim.quest_teleop_sim import TCP_OFFSET, Clutch, QuestStream, add_tc
 from example.sim.visualizer import Visualizer
 
 RATE_HZ = 100.0                   # 必须远快于电机 100 ms CAN 看门狗
-MAX_JOINT_STEP = 2.5 / RATE_HZ    # 每步关节指令变化上限 (rad)
+MAX_JOINT_STEP = 6.0 / RATE_HZ    # 每步关节指令变化上限 (rad)
 GRIPPER_OPEN_RAD = -3.1          # 夹爪张开位置 (rad，0 = 闭合)，需按实物标定；None = 不控制夹爪
 
 
@@ -49,7 +49,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("hardware_yaml", nargs="?", default=None, help="hardware config file")
     parser.add_argument("--host", default="100.72.77.83")
-    parser.add_argument("--port", type=int, default=9392)
+    parser.add_argument("--port", type=int, default=9391)
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     args = parser.parse_args()
 
@@ -107,6 +107,8 @@ def main():
                 result = solve_ik(model, data, frame_id, pin.SE3(target[1], target[0]),
                                   q_cmd, ik_params, controlled_joints=n)
                 q_cmd += np.clip(result.q - q_cmd, -MAX_JOINT_STEP, MAX_JOINT_STEP)
+                if np.linalg.norm(result.q-q_cmd)>0.0001:
+                    print("clipped")
                 rebotarm.arm.send_mit(q_cmd, tau=compute_generalized_gravity(model, q_meas, data)[:n])
                 if GRIPPER_OPEN_RAD is not None:
                     trigger = sample["control_intent"]["hands"][args.hand]["gripper"]
