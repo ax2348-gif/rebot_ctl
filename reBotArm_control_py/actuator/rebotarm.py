@@ -128,6 +128,7 @@ def load_cfg(hw_yaml: str | None = None) -> dict:
         "joints": joints,
         "arm_control_mode": str(data.get("arm_control_mode", "posvel")),
         "urdf_path": data.get("urdf_path"),
+        "end_effector_frame": data.get("end_effector_frame"),
     }
 
 
