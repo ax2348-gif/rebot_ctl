@@ -2,7 +2,7 @@
 """Quest 遥操作仿真 — 读取 Quest 的 control_intent，离合 (clutch) 驱动 MeshCat 机械臂。
 
 用法:
-    conda run -n lerobot python example/sim/quest_teleop_sim.py [--host 100.72.77.83 --port 9392 --hand right]
+    conda run -n lerobot python example/sim/quest_teleop_sim.py [--host 100.72.77.83 --port 9391 --hand right]
 
 Quest 端 (quest_env) 已完成离合判定，每帧发送 teleop.operator_intent.v1:
     engaged / needs_release / engagement_id、delta_position、delta_rotation (operator_base_flu)。
@@ -139,7 +139,7 @@ def show_frame(viz, name, p, R, scale=0.08):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="100.72.77.83")
-    parser.add_argument("--port", type=int, default=9392)
+    parser.add_argument("--port", type=int, default=9391)
     parser.add_argument("--hand", choices=("left", "right"), default="right")
     parser.add_argument("--tcp-offset", type=float, nargs=3, metavar=("X", "Y", "Z"),
                         help="覆盖 TCP_OFFSET 的平移 (米，end_link 坐标系)")

@@ -11,15 +11,13 @@
 握持时另显示 anchor（锚点）与 target（离合目标）。
 
 用法 / Usage:
-    conda run -n lerobot python tools/quest_teleop.py [hardware_yaml] [--host 100.72.77.83 --port 9392 --hand right]
+    conda run -n lerobot python tools/quest_teleop.py [hardware_yaml] [--host 100.72.77.83 --port 9391 --hand right]
 
 退出 / Exit: Ctrl+C（失能并断开）
 
-use 
-nohup nc -s 100.72.77.83 -L -p 9392 nc 127.0.0.1 9391 >/dev/null 2>&1 &
-in the quest, and 
-nc 100.72.77.83 9392
-locally
+The Quest app serves the stream on every interface, port 9391 (quest_env 447e80f and
+later); connect to the headset's address directly, no relay needed. Check with
+nc 100.72.77.83 9391
 """
 
 import argparse
