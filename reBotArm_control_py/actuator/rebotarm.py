@@ -82,6 +82,14 @@ class JointCfg:
     pos_kp: float = 0.0
     pos_ki: float = 0.0
     vlim: float = 0.0
+    # Optional joint-space limits on q from the config (rad), independent of the URDF;
+    # see joint_limits().
+    q_min: Optional[float] = None
+    q_max: Optional[float] = None
+
+
+def _deg_to_rad(value) -> Optional[float]:
+    return None if value is None else math.radians(float(value))
 
 
 def load_cfg(hw_yaml: str | None = None) -> dict:
@@ -107,6 +115,8 @@ def load_cfg(hw_yaml: str | None = None) -> dict:
             pos_kp=float(pc.get("pos_kp", 0.0)),
             pos_ki=float(pc.get("pos_ki", 0.0)),
             vlim=float(pc.get("vlim", 2.0)),
+            q_min=_deg_to_rad(j.get("q_min_deg")),
+            q_max=_deg_to_rad(j.get("q_max_deg")),
         ))
 
     return {
@@ -205,6 +215,28 @@ def load_joint_limits(urdf_path: str | None) -> Dict[str, tuple[float, float]]:
         if lim is None or lim.get("lower") is None or lim.get("upper") is None:
             continue
         limits[joint.get("name")] = (float(lim.get("lower")), float(lim.get("upper")))
+    return limits
+
+
+def joint_limits(cfg: dict) -> Dict[str, tuple[float, float]]:
+    """每个关节的有效位置限位（rad）：配置中可选的 q_min_deg / q_max_deg 与 URDF 限位同时生效。
+
+    Effective [lower, upper] limits on each joint's q (rad). The optional per-joint
+    ``q_min_deg`` / ``q_max_deg`` in the hardware config are plain joint-space limits on q,
+    independent of the URDF; the URDF's own limits still apply too, so the tighter of the
+    two wins on each side. Joints with neither are absent.
+    """
+    limits = dict(load_joint_limits(cfg.get("urdf_path")))
+    for jc in cfg["joints"]:
+        if jc.q_min is None and jc.q_max is None:
+            continue
+        lo, hi = limits.get(jc.name, (-math.inf, math.inf))
+        lo = lo if jc.q_min is None else max(lo, jc.q_min)
+        hi = hi if jc.q_max is None else min(hi, jc.q_max)
+        if not lo < hi:
+            raise ValueError(f"{jc.name}: q_min_deg/q_max_deg and the URDF limits leave no range "
+                             f"({math.degrees(lo):+.1f}° .. {math.degrees(hi):+.1f}°)")
+        limits[jc.name] = (lo, hi)
     return limits
 
 
@@ -760,7 +792,7 @@ class RebotArm:
         self._all_joints: List[JointCfg] = cfg["joints"]
         self._groups_def: dict = cfg["groups"]
         self._arm_control_mode: str = cfg.get("arm_control_mode", "posvel")
-        self._joint_limits = load_joint_limits(cfg.get("urdf_path"))
+        self._joint_limits = joint_limits(cfg)
 
         self._ctrl_map: Dict[str, Controller] = {}
         self._motor_map: Dict[str, any] = {}

@@ -27,7 +27,7 @@ from ..actuator.rebotarm import (
     RebotArm,
     dm_timeout_register_value,
     load_cfg,
-    load_joint_limits,
+    joint_limits,
     resolve_channel,
 )
 from ._common import (describe_status, make_controller, optional, parser, print_joint_table,
@@ -54,7 +54,7 @@ def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
     cfg = load_cfg(hw_yaml)
     cfg["channel"] = resolve_channel(cfg, channel)
     joints = cfg["joints"]
-    limits = load_joint_limits(cfg.get("urdf_path"))
+    limits = joint_limits(cfg)
     target = dm_timeout_register_value(CAN_TIMEOUT_MS)
     print(f"Config: {cfg['name']} on {cfg['channel']}, {len(joints)} joints")
 

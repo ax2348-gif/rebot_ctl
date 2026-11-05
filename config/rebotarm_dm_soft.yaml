@@ -37,6 +37,10 @@ joints:
     feedback_id: 0x11
     model: "4340P"
     vendor: "damiao"
+    # 可选的关节空间限位（q，单位：度），与 URDF 无关；URDF 自身的限位仍同时生效。
+    # Optional joint-space limits on q (degrees), independent of the URDF; the URDF's own
+    # limits still apply as well. -39°: bounds clockwise yaw (seen from above).
+    q_min_deg: -39.0
     MIT:
       kp: 72.0
       kd: 8.0
