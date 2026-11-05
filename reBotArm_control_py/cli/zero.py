@@ -42,7 +42,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     arm = RebotArm(args.hardware_yaml, channel=args.channel)
-    print(f"Config: {arm.hardware_yaml} on {arm._channel}")
+    print(f"Config: {arm.hardware_yaml} on {arm.channel}")
     arm.connect(check_limits=False)  # still verifies the CAN watchdog
     try:
         arm.disable_all()

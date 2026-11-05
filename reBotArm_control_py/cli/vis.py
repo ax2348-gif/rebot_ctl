@@ -86,7 +86,7 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     arm = RebotArm(args.hardware_yaml, channel=args.channel)
-    print(f"Config: {arm.hardware_yaml} on {arm._channel}")
+    print(f"Config: {arm.hardware_yaml} on {arm.channel}")
     # Start the viewer before touching the motors, so a failure here never leaves them enabled.
     print("Starting MeshCat...")
     viewer = ArmViewer(load_cfg(args.hardware_yaml).get("urdf_path") or None)

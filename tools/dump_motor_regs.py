@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from motorbridge import Controller
 
-from reBotArm_control_py.actuator.rebotarm import load_cfg
+from reBotArm_control_py.actuator.rebotarm import load_cfg, resolve_channel
 
 READ_TIMEOUT_MS = 500
 
@@ -97,7 +97,7 @@ def main():
     if not joints:
         sys.exit("No Damiao motors in config.")
 
-    ctrl = make_controller(cfg["channel"])
+    ctrl = make_controller(resolve_channel(cfg))
     motors = {}
     try:
         values = {}

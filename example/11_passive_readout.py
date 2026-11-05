@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from motorbridge import Controller
 
-from reBotArm_control_py.actuator.rebotarm import load_cfg
+from reBotArm_control_py.actuator.rebotarm import load_cfg, resolve_channel
 from reBotArm_control_py.kinematics import compute_fk, get_arm_joint_count, pad_q_for_model
 from example.sim.visualizer import Visualizer
 
@@ -105,7 +105,7 @@ def main() -> None:
     lo = model.lowerPositionLimit[:n_arm]
     hi = model.upperPositionLimit[:n_arm]
 
-    ctrl = make_controller(cfg["channel"])
+    ctrl = make_controller(resolve_channel(cfg))
     motors = {}
     try:
         for name, jc in all_cfgs.items():

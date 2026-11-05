@@ -29,6 +29,8 @@ from .rebotarm import (
     CAN_TIMEOUT_MS,
     load_cfg,
     load_gravity_compensation_config,
+    resolve_channel,
+    SerialPortNotFoundError,
 )
 
 __all__ = [
@@ -40,4 +42,6 @@ __all__ = [
     "CAN_TIMEOUT_MS",
     "load_cfg",
     "load_gravity_compensation_config",
+    "resolve_channel",
+    "SerialPortNotFoundError",
 ]

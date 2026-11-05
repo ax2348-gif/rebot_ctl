@@ -112,12 +112,75 @@ def load_cfg(hw_yaml: str | None = None) -> dict:
     return {
         "name": data.get("name", "reBotArm"),
         "channel": data.get("channel", "/dev/ttyACM0"),
+        "serial_by_id": data.get("serial_by_id") or None,
         "rate": float(data.get("rate", 500.0)),
         "groups": data.get("groups", {}),
         "joints": joints,
         "arm_control_mode": str(data.get("arm_control_mode", "posvel")),
         "urdf_path": data.get("urdf_path"),
     }
+
+
+# --------------------------------------------------------------------------
+# 串口定位 / Locating the serial bridge
+# --------------------------------------------------------------------------
+
+SERIAL_BY_ID_DIR = Path("/dev/serial/by-id")
+
+
+class SerialPortNotFoundError(RuntimeError):
+    """配置的 serial_by_id 设备未连接 / The configured serial_by_id device is not attached."""
+
+
+def _usb_serial_number(by_id: str) -> str:
+    """USB serial number inside a udev by-id name: usb-<vendor>_<product>_<serial>-if<NN>."""
+    return by_id.rsplit("-if", 1)[0].rsplit("_", 1)[-1]
+
+
+def resolve_channel(cfg: dict, override: str | None = None) -> str:
+    """The transport to open: ``override``, else ``serial_by_id``, else ``channel``.
+
+    ``serial_by_id`` is the device's name under /dev/serial/by-id on Linux (e.g.
+    ``usb-HDSC_CDC_Device_00000000050C-if00``). It is stable across reboots and
+    replugging, unlike /dev/ttyACM<n>. Where that directory does not exist (macOS,
+    Windows) the port is found by the USB serial number embedded in the name. If the
+    device is configured but not attached this raises SerialPortNotFoundError instead
+    of falling back to ``channel``, which might name a different device.
+    """
+    if override:
+        return override
+    by_id = cfg.get("serial_by_id")
+    if not by_id:
+        return cfg["channel"]
+    linux_path = SERIAL_BY_ID_DIR / by_id
+    if linux_path.exists():
+        return str(linux_path)
+
+    serial_number = _usb_serial_number(by_id)
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        ports = []
+    else:
+        ports = [p for p in list_ports.comports() if p.serial_number == serial_number]
+    devices = []
+    for p in ports:
+        dev = p.device
+        # macOS lists the call-out device (cu.*); use its tty.* twin when present, the
+        # name these configs have always used.
+        if dev.startswith("/dev/cu.") and Path(dev.replace("/dev/cu.", "/dev/tty.", 1)).exists():
+            dev = dev.replace("/dev/cu.", "/dev/tty.", 1)
+        devices.append(dev)
+    if len(devices) == 1:
+        return devices[0]
+    if len(devices) > 1:
+        raise SerialPortNotFoundError(
+            f"several ports have USB serial number {serial_number}: {', '.join(devices)}; "
+            f"pass the channel explicitly")
+    raise SerialPortNotFoundError(
+        f"serial bridge {by_id!r} is not attached (looked for {linux_path} and for a port "
+        f"with USB serial number {serial_number}). Check the arm's USB cable, or pass the "
+        f"channel explicitly.")
 
 
 def load_joint_limits(urdf_path: str | None) -> Dict[str, tuple[float, float]]:
@@ -684,13 +747,15 @@ class RebotArm:
     """
 
     def __init__(self, hw_yaml: str | None = None, channel: str | None = None) -> None:
-        """channel overrides the config's ``channel`` (the serial port or CAN interface
-        differs per machine, e.g. /dev/tty.usbmodem* on macOS, /dev/ttyACM0 on Linux)."""
+        """channel overrides the config's ``serial_by_id`` / ``channel`` (see
+        resolve_channel); the port is looked up when connecting, not here."""
         self._hw_yaml = _resolve_hw_cfg_path(hw_yaml).name
         cfg = load_cfg(hw_yaml)
 
         self._name: str = cfg["name"]
-        self._channel: str = channel or cfg["channel"]
+        self._channel_cfg = {"channel": cfg["channel"], "serial_by_id": cfg["serial_by_id"]}
+        self._channel_override = channel
+        self._channel: str = channel or cfg["channel"]  # replaced by the resolved port on connect
         self._rate: float = cfg["rate"]
         self._all_joints: List[JointCfg] = cfg["joints"]
         self._groups_def: dict = cfg["groups"]
@@ -829,7 +894,16 @@ class RebotArm:
                   "calibrated zero pose."
             )
 
+    @property
+    def channel(self) -> str:
+        """The port this arm uses (or would use), for display; never raises."""
+        try:
+            return resolve_channel(self._channel_cfg, self._channel_override)
+        except SerialPortNotFoundError:
+            return f"{self._channel_cfg['serial_by_id']} (not attached)"
+
     def _make_controller(self, vendor: str) -> Controller:
+        self._channel = resolve_channel(self._channel_cfg, self._channel_override)
         if self._channel.startswith("/dev/"):  # any device path is the serial bridge; CAN interfaces are bare names (can0)
             return Controller.from_dm_serial(self._channel, 921600)
         return Controller(self._channel)

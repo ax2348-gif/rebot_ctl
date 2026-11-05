@@ -142,6 +142,7 @@ class FakeArm:
     def __init__(self, hw_yaml=None, n_arm=6, status=0x1, positions=None):
         self.hardware_yaml = hw_yaml or "fake.yaml"
         self._channel = "/dev/fake"
+        self.channel = "/dev/fake"
         self.calls = []
         self.arm, self.gripper = FakeGroup(n_arm), FakeGroup(1)
         names = [f"joint{i + 1}" for i in range(n_arm)] + ["gripper"]

@@ -28,6 +28,7 @@ from ..actuator.rebotarm import (
     dm_timeout_register_value,
     load_cfg,
     load_joint_limits,
+    resolve_channel,
 )
 from ._common import (describe_status, make_controller, optional, parser, print_joint_table,
                       wait_for_feedback)
@@ -50,7 +51,7 @@ def _close(ctrl, motors: dict) -> None:
 def check(hw_yaml: Optional[str], channel: Optional[str] = None) -> int:
     """Read-only check of the arm's setup. Returns 0 if everything is in order."""
     cfg = load_cfg(hw_yaml)
-    cfg["channel"] = channel or cfg["channel"]
+    cfg["channel"] = resolve_channel(cfg, channel)
     joints = cfg["joints"]
     limits = load_joint_limits(cfg.get("urdf_path"))
     target = dm_timeout_register_value(CAN_TIMEOUT_MS)
@@ -156,7 +157,7 @@ def store_watchdog(hw_yaml: Optional[str], channel: Optional[str] = None) -> int
     register and asking the user to type STORE.
     """
     cfg = load_cfg(hw_yaml)
-    cfg["channel"] = channel or cfg["channel"]
+    cfg["channel"] = resolve_channel(cfg, channel)
     others = [jc.name for jc in cfg["joints"] if jc.vendor != "damiao"]
     if others:
         print(f"Only Damiao motors are supported; aborting (non-Damiao: {', '.join(others)}).")
