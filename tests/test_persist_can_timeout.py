@@ -48,7 +48,9 @@ class PersistCanTimeoutTests(unittest.TestCase):
         ctrl = Mock()
         ctrl.add_damiao_motor.side_effect = lambda *a: next(it)
         out = io.StringIO()
+        # The config names the arm by serial_by_id; pretend it is attached.
         with patch("motorbridge.Controller.from_dm_serial", return_value=ctrl), \
+                patch("reBotArm_control_py.cli.setup.resolve_channel", return_value="/dev/ttyACM1"), \
                 patch("builtins.input", return_value=answer), \
                 patch("sys.argv", [str(SCRIPT), "rebotarm_dm.yaml"]), \
                 contextlib.redirect_stdout(out):

@@ -63,7 +63,9 @@ class SetupCheckTests(unittest.TestCase):
         it = iter(motors)
         ctrl = Mock()
         ctrl.add_damiao_motor.side_effect = lambda *a: next(it)
-        with patch("motorbridge.Controller.from_dm_serial", return_value=ctrl):
+        # The config names the arm by serial_by_id; pretend it is attached.
+        with patch("motorbridge.Controller.from_dm_serial", return_value=ctrl), \
+                patch.object(setup_cli, "resolve_channel", return_value="/dev/ttyACM1"):
             code, out = run(setup_cli.main, [HW])
         for name in ("enable_all", "disable_all", "shutdown"):
             getattr(ctrl, name).assert_not_called()
