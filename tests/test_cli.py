@@ -142,14 +142,16 @@ class SetupCheckTests(unittest.TestCase):
 
 
 class FakeGroup:
-    def __init__(self, n):
+    def __init__(self, n, names=()):
         self.num_joints = n
+        self.joint_names = list(names)
+        self.mit_ok = True
         self.sent = []
         self.mode = None
 
     def mode_mit(self):
         self.mode = "mit"
-        return True
+        return self.mit_ok
 
     def send_mit(self, pos, vel=None, kp=None, kd=None, tau=None):
         self.sent.append((pos, vel, kp, kd, tau))
@@ -163,13 +165,15 @@ class FakeArm:
         self._channel = "/dev/fake"
         self.channel = "/dev/fake"
         self.calls = []
-        self.arm, self.gripper = FakeGroup(n_arm), FakeGroup(1)
         names = [f"joint{i + 1}" for i in range(n_arm)] + ["gripper"]
+        self.arm, self.gripper = FakeGroup(n_arm, names[:n_arm]), FakeGroup(1, ["gripper"])
+        self.has_state = True
         self.joint_names = names
         self._all_joints = [SimpleNamespace(name=n, vendor="damiao") for n in names]
         self.status = status
         self._motor_map = {n: SimpleNamespace(clear_error=lambda n=n: self.calls.append(("clear_error", n)),
-                                              get_state=lambda: SimpleNamespace(status_code=self.status))
+                                              get_state=lambda: SimpleNamespace(status_code=self.status, pos=0.1)
+                                              if self.has_state else None)
                            for n in names}
         self.positions = positions if positions is not None else np.zeros(len(names))
         self.controller = None
@@ -188,6 +192,8 @@ class FakeArm:
 
     def get_positions(self, **kwargs):
         self.reads += 1
+        if self.controller is not None:
+            self.controller(self, 0.01)  # stand-in for the control thread
         return self.positions
 
     def names(self):
@@ -226,7 +232,7 @@ class ZeroTests(unittest.TestCase):
 
 
 class VisTests(unittest.TestCase):
-    def run_vis(self, arm, stop_after=3):
+    def run_vis(self, arm, stop_after=3, argv=(HW,), gravity=None):
         viewer = Mock(port=7000)
 
         def update(pos):
@@ -238,8 +244,9 @@ class VisTests(unittest.TestCase):
         try:
             with patch.object(vis_cli, "RebotArm", return_value=arm), \
                     patch.object(vis_cli, "ArmViewer", return_value=viewer), \
+                    patch.object(vis_cli, "GravityTorque", return_value=gravity), \
                     patch.object(vis_cli.time, "sleep"):
-                code, out = run(vis_cli.main, [HW])
+                code, out = run(vis_cli.main, list(argv))
         finally:
             signal.signal(signal.SIGINT, old)
         return code, out, viewer
@@ -267,6 +274,45 @@ class VisTests(unittest.TestCase):
         self.assertIn("Motor fault", out)
         self.assertEqual(arm.names()[-1], "disconnect")
 
+    def test_refuses_to_enable_without_mit_mode(self):
+        arm = FakeArm()
+        arm.arm.mit_ok = False
+        code, out, _ = self.run_vis(arm)
+        self.assertEqual(code, 1)
+        self.assertIn("nothing enabled", out)
+        self.assertNotIn("enable_all", arm.names())
+        self.assertNotIn("start_control_loop", arm.names())
+        self.assertEqual(arm.names()[-1], "disconnect")
+
+    def fake_gravity(self):
+        g = Mock(return_value=np.arange(1.0, 7.0), ramp_s=0.0, limit=12.0)
+        g.scale = np.ones(6)
+        return g
+
+    def test_gravity_torque_only_after_enable_and_zero_gains(self):
+        arm = FakeArm()
+        code, out, _ = self.run_vis(arm, argv=(HW, "-g"), gravity=self.fake_gravity())
+        self.assertEqual(code, 0)
+        sent = arm.arm.sent
+        # start_control_loop ran the controller once before enable_all: zero torque then
+        self.assertTrue(np.all(sent[0][4] == 0))
+        later = [tau for (_, _, kp, kd, tau) in sent[1:]]
+        self.assertTrue(later, "controller ran after enabling")
+        self.assertTrue(all(np.allclose(t, np.arange(1.0, 7.0)) for t in later),
+                        "after enabling the arm gets the gravity torque")
+        for pos, vel, kp, kd, tau in sent:
+            self.assertTrue(np.all(kp == 0) and np.all(kd == 0), "gains stay zero with -g")
+        for _, _, _, _, tau in arm.gripper.sent:
+            self.assertTrue(np.all(tau == 0), "gripper gets no torque")
+        self.assertIn("Gravity compensated", out)
+
+    def test_gravity_zero_torque_without_readings(self):
+        arm = FakeArm()
+        arm.has_state = False
+        code, out, _ = self.run_vis(arm, argv=(HW, "-g"), gravity=self.fake_gravity())
+        for _, _, _, _, tau in arm.arm.sent:
+            self.assertTrue(np.all(tau == 0))
+
     def test_error_still_disconnects(self):
         arm = FakeArm()
         arm.get_positions = Mock(side_effect=RuntimeError("bus gone"))
@@ -277,3 +323,21 @@ class VisTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GravityTorqueTests(unittest.TestCase):
+    def setUp(self):
+        from reBotArm_control_py.actuator import load_cfg
+        self.urdf = load_cfg(HW)["urdf_path"]
+
+    def test_clipped_and_scaled(self):
+        g = vis_cli.GravityTorque(self.urdf, {"tau_scale": 2.0}, 6, limit=1.0)
+        tau = g(np.zeros(6))
+        self.assertEqual(tau.shape, (6,))
+        self.assertTrue(np.all(np.abs(tau) <= 1.0))
+        unclipped = vis_cli.GravityTorque(self.urdf, {}, 6, limit=1e9)(np.zeros(6))
+        self.assertTrue(np.any(np.abs(unclipped) > 1.0), "the clip is exercised")
+
+    def test_bad_vector_length_rejected(self):
+        with self.assertRaises(ValueError):
+            vis_cli.GravityTorque(self.urdf, {"tau_scale": [1.0, 1.0]}, 6, limit=10)
