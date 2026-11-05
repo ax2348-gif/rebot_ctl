@@ -182,7 +182,7 @@ class RebotArmEndPose:
         if not self._running:
             return
 
-        q_curr, _, _ = self.rebotarm.get_state()
+        q_curr, _, _ = self.rebotarm.get_state(position_source="output")
         q_curr = q_curr[: self._n]
         q_start = q_curr.copy()
 
@@ -238,7 +238,7 @@ class RebotArmEndPose:
         if not self._running:
             return False
 
-        q_curr, _, _ = self.rebotarm.get_state()
+        q_curr, _, _ = self.rebotarm.get_state(position_source="output")
         q_curr = pad_q_for_model(self._model, q_curr, self._n)
         T_target = pos_rot_to_se3(
             np.array([x, y, z]), roll=roll, pitch=pitch, yaw=yaw,
@@ -269,7 +269,7 @@ class RebotArmEndPose:
         if not self._running:
             return False
 
-        q_start, _, _ = self.rebotarm.get_state()
+        q_start, _, _ = self.rebotarm.get_state(position_source="output")
         q_start = pad_q_for_model(self._model, q_start, self._n)
 
         T_target = pos_rot_to_se3(
@@ -310,12 +310,17 @@ class RebotArmEndPose:
             return False
 
         pts = [pt.q[: self._n].copy() for pt in joint_traj]
+        # 有限差分速度前馈, 终点速度为零
+        dt_pt = duration / len(pts)
+        vels = [(pts[i + 1] - pts[i]) / dt_pt for i in range(len(pts) - 1)]
+        vels.append(np.zeros(self._n))
 
         self._stop_send.set()
         if self._send_thread is not None:
             self._send_thread.join(timeout=5.0)
 
         self._traj = pts
+        self._traj_vel = vels
         self._moving = True
         self._stop_send.clear()
         self._send_thread = threading.Thread(
@@ -331,12 +336,11 @@ class RebotArmEndPose:
             if self._arm_control_mode == "mit":
                 tau_ff = np.zeros(self._n)
                 if self._use_gravity_ff:
-                    q_now = self._arm_group.get_positions(request_feedback=False)
+                    q_now = self._arm_group.get_positions(request_feedback=False, position_source="output")
                     q_now = pad_q_for_model(self._model, q_now, self._n)
                     tau_ff = compute_generalized_gravity(self._model, q_now, self._data)[: self._n]
-                    # tau_ff[1] *= 1.55  # joint2 额外补偿
-                    # tau_ff[2] *= 1.55  # joint3 额外补偿
-                    
+                    tau_ff[3] *= 0.84  # joint4 补偿缩放
+                    tau_ff[4] *= 0.84  # joint5 补偿缩放
                 self._arm_group.send_mit(
                     self._q_target,
                     vel=self._qd_target,
@@ -368,5 +372,7 @@ class RebotArmEndPose:
             if self._stop_send.is_set():
                 return
             self._q_target[:] = self._traj[i]
+            self._qd_target[:] = self._traj_vel[i]
             time.sleep(interval)
+        self._qd_target[:] = 0.0
         self._moving = False
