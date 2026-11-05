@@ -227,8 +227,9 @@ def joint_limits(cfg: dict) -> Dict[str, tuple[float, float]]:
     independent of the URDF; the URDF's own limits still apply too, so the tighter of the
     two wins on each side. Joints with neither are absent.
 
-    Tools that generate setpoints use these to reject illegal targets. Nothing uses them to
-    correct or move a joint, and RebotArm.connect()'s startup check uses only the URDF.
+    RebotArm enforces them on every position setpoint its groups send (send_mit with kp > 0,
+    send_pos_vel): an illegal one is refused and the joint keeps its last setpoint. Nothing
+    uses them to correct or move a joint, and connect()'s startup check uses only the URDF.
     """
     limits = dict(load_joint_limits(cfg.get("urdf_path")))
     for jc in cfg["joints"]:
@@ -478,6 +479,7 @@ class JointGroup:
         all_joints: List[JointCfg],
         motor_map: Dict[str, any],
         ctrl_map: Dict[str, Controller],
+        limits: Optional[Dict[str, tuple]] = None,
     ) -> None:
         self.name = name
         self._jn: List[str] = joint_names
@@ -490,6 +492,12 @@ class JointGroup:
         self._mit_kp: np.ndarray = np.array([j.kp for j in self._jcfgs], dtype=np.float64)
         self._mit_kd: np.ndarray = np.array([j.kd for j in self._jcfgs], dtype=np.float64)
         self._pv_vlim: np.ndarray = np.array([j.vlim for j in self._jcfgs], dtype=np.float64)
+        # Setpoint limits (RebotArm.setpoint_limits: URDF and config q limits); see _legal().
+        lim = limits or {}
+        self._q_lo = np.array([lim.get(n, (-np.inf, np.inf))[0] for n in self._jn], dtype=np.float64)
+        self._q_hi = np.array([lim.get(n, (-np.inf, np.inf))[1] for n in self._jn], dtype=np.float64)
+        self._q_last = np.full(len(self._jn), np.nan)  # last position setpoint sent, per joint
+        self._q_refused = np.zeros(len(self._jn), dtype=bool)
 
     # ── 属性 ────────────────────────────────────────────────────────────
 
@@ -604,6 +612,28 @@ class JointGroup:
         time.sleep(0.2)
         return ok
 
+    # ── 限位 / Setpoint limits ──────────────────────────────────────────
+
+    def _legal(self, pos: np.ndarray, checked: np.ndarray) -> np.ndarray:
+        """Mask of the joints whose position setpoint may be sent.
+
+        A setpoint inside the limits is legal, and so is one no further outside than the
+        last one sent (a joint that starts outside may be brought back). An illegal one is
+        refused: that joint keeps its last setpoint, nothing is corrected or moved. Joints
+        not ``checked`` (MIT with kp = 0, where the position is ignored) always pass.
+        """
+        out = np.maximum(self._q_lo - pos, pos - self._q_hi)  # > 0: outside, by this much
+        last_out = np.maximum(self._q_lo - self._q_last, self._q_last - self._q_hi)
+        ok = (out <= 0.0) | ~checked | (out <= last_out)  # NaN last_out (none sent): False
+        bad = ~ok & ~np.isnan(self._q_last)
+        for i in np.flatnonzero(~ok):
+            if not self._q_refused[i]:
+                print(f"[{self.name}/limits] {self._jn[i]}: setpoint {np.degrees(pos[i]):+.1f}° is "
+                      f"outside {np.degrees(self._q_lo[i]):+.1f}..{np.degrees(self._q_hi[i]):+.1f}°; "
+                      + ("refused, holding the last setpoint" if bad[i] else "refused (nothing sent)"))
+        self._q_refused = ~ok
+        return ok
+
     # ── MIT 发送 ────────────────────────────────────────────────────────
 
     def send_mit(
@@ -624,18 +654,26 @@ class JointGroup:
             kp = self._mit_kp
         if kd is None:
             kd = self._mit_kd
+        vel = np.asarray(vel, dtype=np.float64).reshape(-1)
+        kp = np.asarray(kp, dtype=np.float64).reshape(-1)
 
+        ok = self._legal(pos, kp[:n] != 0.0)
         for i, jc in enumerate(self._jcfgs):
+            p, v = (float(pos[i]), float(vel[i])) if ok[i] else (float(self._q_last[i]), 0.0)
+            if np.isnan(p):
+                continue  # refused, and no earlier setpoint to hold
             try:
                 self._mm[jc.name].send_mit(
-                    float(pos[i]),
-                    float(vel[i]),
+                    p,
+                    v,
                     float(kp[i]),
                     float(kd[i]),
                     float(tau[i]),
                 )
             except CallError:
                 pass
+            if kp[i] != 0.0:
+                self._q_last[i] = p
 
     # ── POS_VEL 发送 ───────────────────────────────────────────────────
 
@@ -648,14 +686,22 @@ class JointGroup:
         if vlim is None:
             vlim = self._pv_vlim
         vlim = np.asarray(vlim, dtype=np.float64).reshape(-1)
-        for i in range(min(len(pos), len(vlim))):
+        n = min(len(pos), len(vlim), self.num_joints)
+        padded, checked = np.zeros(self.num_joints), np.arange(self.num_joints) < n
+        padded[:n] = pos[:n]
+        ok = self._legal(padded, checked)
+        for i in range(n):
+            p = float(pos[i]) if ok[i] else float(self._q_last[i])
+            if np.isnan(p):
+                continue  # refused, and no earlier setpoint to hold
             try:
                 self._mm[self._jcfgs[i].name].send_pos_vel(
-                    float(pos[i]),
+                    p,
                     float(vlim[i]),
                 )
             except CallError:
                 pass
+            self._q_last[i] = p
 
     # ── VEL 发送 ───────────────────────────────────────────────────────
 
@@ -977,6 +1023,7 @@ class RebotArm:
                 all_joints=self._all_joints,
                 motor_map=self._motor_map,
                 ctrl_map=self._ctrl_map,
+                limits=self.setpoint_limits,
             )
             self._groups[gname] = g
         if "gripper" not in self._groups:
@@ -1036,6 +1083,7 @@ class RebotArm:
             all_joints=self._all_joints,
             motor_map=self._motor_map,
             ctrl_map=self._ctrl_map,
+            limits=self.setpoint_limits,
         )
         self._groups[name] = g
         return g

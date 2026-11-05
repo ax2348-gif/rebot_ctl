@@ -1,6 +1,8 @@
 """Optional q_min_deg / q_max_deg: joint-space limits on q, alongside the URDF's."""
 import math
 import unittest
+
+import numpy as np
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -69,6 +71,76 @@ class ConfigLimitTests(unittest.TestCase):
                 with self.assertRaises(JointLimitError) as e:
                     robot.check_joint_limits(timeout=0.0)
                 self.assertIn("joint1", str(e.exception))
+
+
+class RecMotor:
+    def __init__(self):
+        self.sent = []
+
+    def send_mit(self, p, v, kp, kd, tau):
+        self.sent.append(("mit", p, v, kp))
+
+    def send_pos_vel(self, p, vlim):
+        self.sent.append(("pv", p))
+
+
+class SetpointEnforcementTests(unittest.TestCase):
+    """RebotArm's groups refuse position setpoints outside setpoint_limits, for every caller."""
+
+    def setUp(self):
+        self.robot = RebotArm("rebotarm_dm_safe.yaml")
+        self.motors = {n: RecMotor() for n in self.robot.joint_names}
+        self.robot._motor_map.update(self.motors)  # the groups share this dict
+        self.arm = self.robot.arm
+        self.lo = self.robot.setpoint_limits["joint1"][0]  # -39°
+        self.j1 = self.motors["joint1"].sent
+
+    def q(self, j1):
+        q = np.full(self.arm.num_joints, -0.5)
+        q[0] = j1
+        return q
+
+    def test_mit_past_the_limit_is_refused_and_the_last_setpoint_held(self):
+        self.arm.send_mit(self.q(self.lo + 0.01), vel=np.full(6, 0.3))
+        self.arm.send_mit(self.q(self.lo - 0.05), vel=np.full(6, 0.3))
+        self.assertEqual(len(self.j1), 2)
+        self.assertAlmostEqual(self.j1[1][1], self.lo + 0.01, msg="held, not the illegal one")
+        self.assertEqual(self.j1[1][2], 0.0, "no velocity feedforward while held")
+        self.assertAlmostEqual(self.motors["joint2"].sent[1][1], -0.5, msg="other joints unaffected")
+        self.arm.send_mit(self.q(self.lo + 0.02))
+        self.assertAlmostEqual(self.j1[2][1], self.lo + 0.02, msg="legal again: sent")
+
+    def test_pos_vel_is_enforced_too(self):
+        self.arm.send_pos_vel(self.q(0.0))
+        self.arm.send_pos_vel(self.q(math.radians(-45)))
+        self.assertEqual([s[1] for s in self.j1], [0.0, 0.0])
+
+    def test_no_correction_a_joint_outside_may_only_come_back(self):
+        # Never commanded before and the first setpoint is illegal: nothing is sent at all.
+        self.arm.send_mit(self.q(math.radians(-50)))
+        self.assertEqual(self.j1, [])
+        self.assertEqual(len(self.motors["joint2"].sent), 1)
+        # Slack (kp = 0): position ignored, so not checked and not remembered.
+        z = np.zeros(6)
+        self.arm.send_mit(self.q(math.radians(-50)), kp=z, kd=z)
+        self.assertEqual(len(self.j1), 1)
+        # Once a setpoint outside was legal (no further out), going back toward legal is fine,
+        # going further out is not.
+        self.arm._q_last[0] = math.radians(-50)
+        self.arm.send_mit(self.q(math.radians(-45)))
+        self.arm.send_mit(self.q(math.radians(-48)))
+        self.assertAlmostEqual(math.degrees(self.j1[1][1]), -45)
+        self.assertAlmostEqual(math.degrees(self.j1[2][1]), -45, msg="further out: held")
+
+    def test_nan_setpoint_is_refused(self):
+        self.arm.send_mit(self.q(0.1))
+        self.arm.send_mit(self.q(float("nan")))
+        self.assertEqual(self.j1[1][1], 0.1)
+
+    def test_added_groups_get_limits(self):
+        g = self.robot.add_group("yaw", ["joint1"])
+        g.send_pos_vel(np.array([self.lo - 0.1]), vlim=np.array([1.0]))
+        self.assertEqual(self.j1, [])
 
 
 if __name__ == "__main__":
