@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 rebot_setup = "reBotArm_control_py.cli.setup:main"
 rebot_zero = "reBotArm_control_py.cli.zero:main"
+rebot_zero_gripper = "reBotArm_control_py.cli.zero_gripper:main"
 rebot_vis = "reBotArm_control_py.cli.vis:main"
 rebot_jog = "reBotArm_control_py.cli.jog:main"
 

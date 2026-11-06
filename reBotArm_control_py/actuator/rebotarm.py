@@ -515,27 +515,28 @@ class JointGroup:
 
     # ── 使能 / 失能 ────────────────────────────────────────────────────
 
-    def enable(self) -> None:
-        by_vendor: Dict[str, List[str]] = {}
+    # Each acts on this group's motors only. The groups share one controller per vendor, so
+    # the controller's enable_all()/disable_all() would also switch every other group: enabling
+    # the arm used to enable the gripper too, which then got no frames and tripped its CAN
+    # watchdog. RebotArm.enable_all()/disable_all() still switch every motor.
+
+    def _each_motor(self, op: str) -> None:
         for jc in self._jcfgs:
-            by_vendor.setdefault(jc.vendor, []).append(jc.name)
-        for vendor in by_vendor:
             try:
-                self._cm[vendor].enable_all()
+                getattr(self._mm[jc.name], op)()
             except CallError as e:
-                print(f"[{self.name}/enable] {e}")
-            time.sleep(0.05)
+                print(f"[{self.name}/{op}/{jc.name}] {e}")
+        self._poll_feedback()
+
+    def enable(self) -> None:
+        self._each_motor("enable")
 
     def disable(self) -> None:
-        by_vendor: Dict[str, List[str]] = {}
-        for jc in self._jcfgs:
-            by_vendor.setdefault(jc.vendor, []).append(jc.name)
-        for vendor in by_vendor:
-            try:
-                self._cm[vendor].disable_all()
-            except CallError as e:
-                print(f"[{self.name}/disable] {e}")
-            time.sleep(0.05)
+        self._each_motor("disable")
+
+    def clear_error(self) -> None:
+        """Clear latched faults (e.g. a tripped CAN watchdog) so the motors can be enabled."""
+        self._each_motor("clear_error")
 
     # ── 模式切换 ────────────────────────────────────────────────────────
 

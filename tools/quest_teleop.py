@@ -10,6 +10,8 @@
 夹爪 / Gripper — independent of the clutch, same Y/X enable as the base (rev_ctl
 examples/quest_teleop.py), so with quest_teleop.sh one press serves both:
     - Y (left controller): enable; the gripper follows the --hand trigger (0 = open).
+      Every Y press that starts following clears the gripper's faults and re-enables it,
+      which also recovers a tripped CAN watchdog.
     - X: disable; the gripper holds its last command (a grasp is kept).
     - 断流 / 失焦 / 手柄无效 / 离合松开: also stop following but keep holding.
     - Only Ctrl-C (disconnect) releases it.
@@ -81,7 +83,7 @@ def main():
             g.mode_mit()
         rebotarm.disable_all()
         enabled = False
-        q_cmd = np.zeros(n)
+        q_cmd = None              # 首次握持前不向机械臂发送任何指令 / nothing is sent to the arm before the first clutch
         gripper_enabled = False   # Y 使能 / X 停用，与底盘相同；与离合无关
         gripper_cmd = None        # 最近一次夹爪指令；首次使能后每帧重发（看门狗 100 ms），保持夹持
         print(f"连接 Quest {args.host}:{args.port}，{args.hand} 手握持键离合；Y/X 使能/停用夹爪。Ctrl-C 退出。")
@@ -100,7 +102,7 @@ def main():
                 clutch.state = "电机读数失败"   # 与 Quest 断流区分：检查电机供电 / CAN 连线
 
             if target is None:
-                if q_meas is not None:   # 读数失败时跳过一帧（重力项需要实测姿态），不让脚本崩溃松开夹爪
+                if q_meas is not None and q_cmd is not None:   # 读数失败时跳过一帧（重力项需要实测姿态），不让脚本崩溃松开夹爪
                     rebotarm.arm.send_mit(q_cmd, tau=compute_generalized_gravity(model, q_meas, data)[:n])
 
                 if enabled:
@@ -108,8 +110,9 @@ def main():
                     enabled = False
             else:
                 if not enabled:
-                    rebotarm.arm.enable()   # 夹爪由 Y 单独使能
                     q_cmd = q_meas[:n].copy()   # 从实测姿态开始，避免跳变
+                    rebotarm.arm.clear_error()  # 例如看门狗触发后 / e.g. after a tripped CAN watchdog
+                    rebotarm.arm.enable()       # 只使能机械臂；夹爪由 Y 单独使能 / arm motors only
                     enabled = True
                 result = solve_ik(model, data, frame_id, pin.SE3(target[1], target[0]),
                                   q_cmd, ik_params, controlled_joints=n)
@@ -127,7 +130,8 @@ def main():
                 elif hands["left"]["buttons"]["primary"]:      # X
                     gripper_enabled = False
                 elif hands["left"]["buttons"]["secondary"]:    # Y
-                    if gripper_cmd is None:
+                    if not gripper_enabled:   # 每次开始跟随都清故障并重新使能 / every press that starts following
+                        rebotarm.gripper.clear_error()
                         rebotarm.gripper.enable()
                     gripper_enabled = True
                 if gripper_enabled:

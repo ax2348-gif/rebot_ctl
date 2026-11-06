@@ -5,6 +5,7 @@ With the venv active these are on PATH:
     rebot_setup   check the arm's one-time setup (motor CAN watchdog, feedback, joint limits);
                   ``--store-watchdog`` writes the watchdog to motor flash
     rebot_zero    set the current pose as every joint's zero
+    rebot_zero_gripper  drive the gripper closed against its stop; ``--zero`` zeroes it there
     rebot_vis     all joints slack (MIT, zero gains) and the live pose in MeshCat
     rebot_jog     jog the end effector from the keyboard (IK; defaults to the safe config)
 
