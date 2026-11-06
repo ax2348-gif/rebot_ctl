@@ -12,6 +12,8 @@ class FakeMotor:
         self.pos = pos
         self.timeout_reg = timeout_reg  # Damiao TIMEOUT register (2000 = 100 ms)
         self.request_feedback = Mock()
+        # JointGroup.enable()/disable()/clear_error() act per motor
+        self.enable, self.disable, self.clear_error = Mock(), Mock(), Mock()
 
     def get_state(self):
         return None if self.pos is None else SimpleNamespace(pos=self.pos, status_code=0)

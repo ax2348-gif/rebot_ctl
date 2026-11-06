@@ -11,6 +11,8 @@ class FakeMotor:
     def __init__(self, timeout_reg):
         self.timeout_reg = timeout_reg  # int, or an Exception to raise
         self.request_feedback = Mock()
+        # JointGroup.enable()/disable()/clear_error() act per motor
+        self.enable, self.disable, self.clear_error = Mock(), Mock(), Mock()
 
     def get_state(self):
         return SimpleNamespace(pos=0.0, status_code=0)
