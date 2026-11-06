@@ -134,7 +134,7 @@ joints:
     vendor: "damiao"
     MIT:
       kp: 1.0
-      kd: 0.0
+      kd: 0.05
     POS_VEL:
       vel_kp: 0.0008
       vel_ki: 0.002
