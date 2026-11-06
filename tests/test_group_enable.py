@@ -4,7 +4,7 @@ The groups share one controller per vendor; its enable_all() would also enable t
 groups (enabling the arm used to enable the gripper, which then tripped its CAN watchdog).
 """
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from reBotArm_control_py.actuator.rebotarm import JointCfg, JointGroup
 
@@ -27,7 +27,8 @@ class GroupEnableTests(unittest.TestCase):
         self.motors["gripper"].enable.assert_not_called()
         self.ctrl.enable_all.assert_not_called()
 
-    def test_gripper_ops_touch_only_the_gripper(self):
+    @patch("reBotArm_control_py.actuator.rebotarm.time.sleep")
+    def test_gripper_ops_touch_only_the_gripper(self, sleep):
         for op in ("enable", "disable", "clear_error"):
             getattr(self.gripper, op)()
             getattr(self.motors["gripper"], op).assert_called_once_with()
@@ -35,6 +36,7 @@ class GroupEnableTests(unittest.TestCase):
                 getattr(self.motors[f"joint{i}"], op).assert_not_called()
         self.ctrl.enable_all.assert_not_called()
         self.ctrl.disable_all.assert_not_called()
+        sleep.assert_called_once()   # the settle after clear_error
 
 
 if __name__ == "__main__":

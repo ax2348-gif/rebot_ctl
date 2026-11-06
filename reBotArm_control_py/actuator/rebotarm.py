@@ -251,6 +251,7 @@ def joint_limits(cfg: dict) -> Dict[str, tuple[float, float]]:
 # disables itself (damping). Stored in motor flash by tools/persist_can_timeout.py;
 # connect() verifies it and refuses to continue on a mismatch.
 CAN_TIMEOUT_MS = 100
+CLEAR_ERROR_SETTLE_S = 0.02  # after JointGroup.clear_error(); see there
 DM_RID_TIMEOUT = 9  # Damiao register: TIMEOUT, units of 50 µs
 
 
@@ -537,6 +538,10 @@ class JointGroup:
     def clear_error(self) -> None:
         """Clear latched faults (e.g. a tripped CAN watchdog) so the motors can be enabled."""
         self._each_motor("clear_error")
+        # A Damiao motor can drop the next frame if it follows a clear too closely: on the
+        # gripper a register read sent right after it went unanswered about one time in three
+        # (so ensure_mode failed), never with a 10 ms gap. Give it twice that before sending more.
+        time.sleep(CLEAR_ERROR_SETTLE_S)
 
     # ── 模式切换 ────────────────────────────────────────────────────────
 
