@@ -34,7 +34,7 @@ print(f"[{rebotarm.hardware_yaml}] 使用配置:")
 print(f"[{rebotarm.hardware_yaml}] Using config: {rebotarm.hardware_yaml}")
 # 设零前跳过限位检查：重新设零正是修复上电 2π 偏移的手段
 # Skip the limit check before zeroing: re-zeroing is what fixes a power-on 2π offset
-rebotarm.connect(check_limits=False)
+rebotarm.connect(check_limits=False, check_gripper=False)
 print("--- 连接成功 ---")
 print("--- Connection OK ---\n")
 

@@ -274,7 +274,7 @@ def main():
     try:
         # 设零时跳过限位检查（设零本身就是修复手段），设零后再检查
         # Skip the limit check when zeroing (zeroing is the fix), then check afterwards
-        rebotarm.connect(check_limits=not args.zero)
+        rebotarm.connect(check_limits=not args.zero, check_gripper=not args.zero)
         print("--- 连接成功 / Connection OK ---\n")
 
         if args.zero:

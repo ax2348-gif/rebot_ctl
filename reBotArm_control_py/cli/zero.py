@@ -43,7 +43,7 @@ def main(argv=None) -> int:
 
     arm = RebotArm(args.hardware_yaml, channel=args.channel)
     print(f"Config: {arm.hardware_yaml} on {arm.channel}")
-    arm.connect(check_limits=False)  # still verifies the CAN watchdog
+    arm.connect(check_limits=False, check_gripper=False)  # still verifies the CAN watchdog; nothing moves
     try:
         arm.disable_all()
         names = arm.joint_names

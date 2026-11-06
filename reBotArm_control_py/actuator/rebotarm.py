@@ -275,6 +275,26 @@ class JointLimitError(RuntimeError):
     """
 
 
+# 夹爪闭合检查（connect(check_gripper=True) 与 rebot_zero_gripper 共用）
+# Gripper closing drive, used by connect(check_gripper=True) and rebot_zero_gripper. MIT as a
+# pure velocity loop (kp = 0, tau = 0): torque = KD * (VEL - v), so it closes quickly while
+# free and pushes with only KD * VEL at the closed stop. Closing is + (closed = 0, open < 0).
+GRIPPER_CLOSE_VEL = 36.0          # rad/s target closing velocity
+GRIPPER_CLOSE_KD = 0.02           # Nm·s/rad; stall push = 0.72 Nm
+GRIPPER_CLOSE_S = 0.5             # drive time (s)
+GRIPPER_CLOSE_RATE_HZ = 200.0     # command rate; well above the 100 ms CAN watchdog
+GRIPPER_CLOSED_TOL_RAD = math.radians(20.0)   # closed must read within this of zero
+
+
+class GripperCheckError(RuntimeError):
+    """夹爪闭合后读数离零点过远（常见原因：单圈编码器上电时多算/少算一圈 2π，或零点丢失）。
+
+    After being driven closed at connect time, the gripper does not read near zero. Its
+    Damiao motor has a single-turn encoder and its range (open ≈ -3.1 rad) is close to ±π,
+    so the usual cause is a 2π power-on wrap; otherwise its zero has moved.
+    """
+
+
 def load_gravity_compensation_config(
     profile: str,
     hw_yaml: str | None = None,
@@ -870,7 +890,7 @@ class RebotArm:
     # Allowed overshoot past URDF limits (rad), for compression/backlash at hard stops
     LIMIT_MARGIN_RAD = 0.2
 
-    def connect(self, check_limits: bool = True) -> None:
+    def connect(self, check_limits: bool = True, check_gripper: bool = True) -> None:
         """连接总线、注册电机。模式切换需在 connect 后调用。
 
         始终校验每个电机的 CAN 看门狗为 CAN_TIMEOUT_MS，否则断开并抛出 CanTimeoutError
@@ -882,6 +902,12 @@ class RebotArm:
         default also checks every joint reading against its URDF limits
         (JointLimitError); only zeroing scripts should pass check_limits=False,
         since re-zeroing is the fix. On any failure the arm is disconnected first.
+
+        With check_gripper (default) the gripper is then driven closed for
+        GRIPPER_CLOSE_S and must read within GRIPPER_CLOSED_TOL_RAD of zero, or
+        GripperCheckError is raised (check_gripper_closed). The zero is never
+        changed. The gripper moves; it is left disabled. Tools that must not move
+        it, or that re-zero it, pass check_gripper=False.
         """
         if self._connected:
             return
@@ -891,9 +917,66 @@ class RebotArm:
             self.check_can_timeout()
             if check_limits:
                 self.check_joint_limits()
+            if check_gripper and self.has_gripper:
+                self.check_gripper_closed()
         except Exception:
             self.disconnect()
             raise
+
+    def close_gripper(
+        self,
+        duration: float = GRIPPER_CLOSE_S,
+        on_sample: Optional[Callable[[float, object], None]] = None,
+    ):
+        """Drive the gripper closed for ``duration`` s (GRIPPER_CLOSE_VEL / GRIPPER_CLOSE_KD).
+
+        Clears the gripper's faults, puts it in MIT mode, enables it (only it), streams the
+        velocity command, then disables it. ``on_sample(t, state)`` is called every cycle.
+        Returns the gripper's last state read while it was still pushing (None if it never
+        answered). The arm motors are not touched. Raises GripperCheckError if the gripper
+        does not confirm MIT mode.
+        """
+        g = self.gripper
+        motor = self._motor_map[g.joint_names[0]]
+        g.clear_error()
+        if not g.mode_mit():
+            raise GripperCheckError("the gripper did not confirm MIT mode; it was not driven")
+        zero = np.zeros(1)
+        vel, kd = np.full(1, GRIPPER_CLOSE_VEL), np.full(1, GRIPPER_CLOSE_KD)
+        period = 1.0 / GRIPPER_CLOSE_RATE_HZ
+        g.enable()
+        try:
+            t_start = time.monotonic()
+            while (t := time.monotonic() - t_start) < duration:
+                t0 = time.monotonic()
+                g.send_mit(zero, vel=vel, kp=zero, kd=kd, tau=zero)
+                g.get_positions()   # feedback request + processing
+                if on_sample is not None:
+                    on_sample(t, motor.get_state())
+                time.sleep(max(0.0, period - (time.monotonic() - t0)))
+            return motor.get_state()
+        finally:
+            g.disable()
+
+    def check_gripper_closed(self, tol: float = GRIPPER_CLOSED_TOL_RAD) -> float:
+        """Close the gripper (close_gripper) and require it to read within ``tol`` of zero.
+
+        Never changes the zero. Returns the closed reading (rad); raises GripperCheckError.
+        """
+        st = self.close_gripper()
+        if st is None:
+            raise GripperCheckError("no feedback from the gripper while closing it")
+        if abs(st.pos) <= tol:
+            return st.pos
+        turns = round(st.pos / (2 * math.pi))
+        why = (f"off by {turns:+d}×2π: the encoder picked the wrong turn at power-on" if turns
+               else "its zero has moved, or it could not close (blocked?)")
+        raise GripperCheckError(
+            "Gripper closing check failed; refusing to continue:\n"
+            f"  closed for {GRIPPER_CLOSE_S:.1f} s, it reads {st.pos:+.3f} rad "
+            f"({math.degrees(st.pos):+.1f}°), more than {math.degrees(tol):.0f}° from zero — {why}\n"
+            "Fix: check nothing blocks it; power-cycle the arm and retry; if it still fails, "
+            "re-zero it closed with: rebot_zero_gripper --zero")
 
     def check_can_timeout(self) -> None:
         """读取每个电机的 CAN 看门狗设置，不等于 CAN_TIMEOUT_MS 则抛出 CanTimeoutError。

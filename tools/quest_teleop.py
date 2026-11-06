@@ -15,6 +15,8 @@ examples/quest_teleop.py), so with quest_teleop.sh one press serves both:
     - X: disable; the gripper holds its last command (a grasp is kept).
     - 断流 / 失焦 / 手柄无效 / 离合松开: also stop following but keep holding.
     - Only Ctrl-C (disconnect) releases it.
+    - At startup it is closed and must read within 20° of zero (RebotArm.check_gripper_closed;
+      up to --connect-tries attempts, default 2); the zero is never changed.
 
 可视化 (红 X / 绿 Y / 蓝 Z): 实机姿态；base、end_link（小）、ee = 实测 TCP；
 握持时另显示 anchor（锚点）与 target（离合目标）。
@@ -40,7 +42,7 @@ from motorbridge import CallError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from reBotArm_control_py.actuator import RebotArm
+from reBotArm_control_py.actuator import GripperCheckError, RebotArm
 from reBotArm_control_py.dynamics import compute_generalized_gravity
 from reBotArm_control_py.kinematics import compute_fk, get_arm_joint_count, pad_q_for_model
 from reBotArm_control_py.kinematics.inverse_kinematics import IKParams, solve_ik
@@ -58,6 +60,10 @@ def main():
     parser.add_argument("--host", default="100.72.77.83")
     parser.add_argument("--port", type=int, default=9391)
     parser.add_argument("--hand", choices=("left", "right"), default="right")
+    parser.add_argument("--connect-tries", type=int, default=2,
+                        help="gripper closing check attempts at startup (default 2): "
+                             "each attempt closes the gripper again, so one that started far open "
+                             "usually passes the second time")
     args = parser.parse_args()
 
     # 先加载可视化器，失败时不会留下已使能的电机
@@ -76,7 +82,20 @@ def main():
     groups = [rebotarm.arm] + ([rebotarm.gripper] if GRIPPER_OPEN_RAD is not None else [])
 
     try:
-        rebotarm.connect()
+        # 夹爪闭合检查最多 --connect-tries 次（不断开重连：串口在 disconnect 后短时间内仍被占用）
+        # The gripper closing check, up to --connect-tries times. It is repeated while connected
+        # (connect() would disconnect on failure, and the serial port stays busy for a moment
+        # after a disconnect, so reconnecting at once fails).
+        rebotarm.connect(check_gripper=False)
+        for attempt in range(1, max(1, args.connect_tries) + 1):
+            try:
+                rebotarm.check_gripper_closed()
+                break
+            except GripperCheckError as e:
+                if attempt >= args.connect_tries:
+                    raise
+                print(f"{e}\n夹爪检查失败，重试 / Gripper check failed; retrying "
+                      f"({attempt + 1}/{args.connect_tries})...")
         for jc in rebotarm._all_joints:   # 清除上次残留故障（如看门狗触发）
             rebotarm._motor_map[jc.name].clear_error()
         for g in groups:

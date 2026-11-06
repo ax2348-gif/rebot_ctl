@@ -221,7 +221,7 @@ class ZeroTests(unittest.TestCase):
         self.assertNotIn("enable_all", arm.names(), "rebot_zero must never enable")
         self.assertEqual(arm.names()[-1], "disconnect")
         connect = next(c for c in arm.calls if c[0] == "connect")
-        self.assertEqual(connect[2], {"check_limits": False})
+        self.assertEqual(connect[2], {"check_limits": False, "check_gripper": False})
         return code, out, arm
 
     def test_needs_confirmation(self):

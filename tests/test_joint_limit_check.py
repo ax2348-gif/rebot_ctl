@@ -36,7 +36,7 @@ class JointLimitCheckTests(unittest.TestCase):
 
         with patch.object(robot, "_setup_motors", side_effect=fake_setup), \
                 patch("reBotArm_control_py.actuator.rebotarm.time.sleep"):
-            robot.connect(**kwargs)
+            robot.connect(**{"check_gripper": False, **kwargs})
         return robot, ctrl
 
     def test_limits_loaded_from_urdf(self):
@@ -68,7 +68,7 @@ class JointLimitCheckTests(unittest.TestCase):
         with patch.object(robot, "_setup_motors", side_effect=fake_setup), \
                 patch("reBotArm_control_py.actuator.rebotarm.time.sleep"):
             with self.assertRaises(JointLimitError):
-                robot.connect()
+                robot.connect(check_gripper=False)
         self.assertFalse(robot._connected)
         ctrl.shutdown.assert_called_once()
 
