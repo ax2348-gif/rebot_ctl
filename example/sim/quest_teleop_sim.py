@@ -49,6 +49,9 @@ from example.sim.visualizer import Visualizer
 STALE_S = 0.2           # 超过该时间未收到新帧视为断流
 RATE_HZ = 60.0
 MAX_JOINT_STEP = 2.5 / RATE_HZ   # 每帧关节步长上限 (rad)，避免奇异处跳变
+# IK 姿态权重（IKParams.rot_weight）：姿态不可达时（如腕部 roll 到限位）保持末端位置，
+# 而不是挪动基座/腕部俯仰去凑姿态 / keep the TCP in place when the orientation is unreachable
+IK_ROT_WEIGHT = 0.02
 GRIPPER_OPEN = 0.0285   # finger_left 上限；finger_right 取负
 
 # 控制点 (TCP) 相对 URDF end_link 的固定变换，在 end_link 坐标系中表示。
@@ -153,7 +156,7 @@ def main():
     data = model.createData()   # 必须在 addFrame 之后创建
     arm_nq = get_arm_joint_count(model, frame_id)
     fingers = [model.joints[model.getJointId(n)].idx_q for n in ("finger_left", "finger_right")]
-    ik_params = IKParams(max_iter=30)
+    ik_params = IKParams(max_iter=30, rot_weight=IK_ROT_WEIGHT)
 
     q = pin.neutral(model)
     gripper = 0.0

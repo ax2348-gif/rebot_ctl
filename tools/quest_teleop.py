@@ -51,6 +51,8 @@ from example.sim.visualizer import Visualizer
 
 RATE_HZ = 100.0                   # 必须远快于电机 100 ms CAN 看门狗
 MAX_JOINT_STEP = 6.0 / RATE_HZ    # 每步关节指令变化上限 (rad)
+IK_ROT_WEIGHT = 0.02              # IK 姿态权重：腕部 roll 到限位时保持末端位置，不用其它关节凑姿态
+                                  # (IKParams.rot_weight; same as example/sim/quest_teleop_sim.py)
 GRIPPER_OPEN_RAD = -3.1          # 夹爪张开位置 (rad，0 = 闭合)，需按实物标定；None = 不控制夹爪
 
 
@@ -72,7 +74,7 @@ def main():
     frame_id = add_tcp_frame(model, TCP_OFFSET)
     data = model.createData()
     n = get_arm_joint_count(model, frame_id)
-    ik_params = IKParams(max_iter=30)
+    ik_params = IKParams(max_iter=30, rot_weight=IK_ROT_WEIGHT)
     viz.meshcat["/Cameras/default/rotated/<object>"].set_property("position", [0.6, 0.5, 0.45])
     show_frame(viz, "frames/base", np.zeros(3), np.eye(3), scale=0.15)
 

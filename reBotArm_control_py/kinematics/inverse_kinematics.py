@@ -26,6 +26,13 @@ class IKParams:
     tolerance: float = 1e-4    # 收敛阈值 ||err||
     step_size: float = 0.5    # 每步更新的缩放系数
     damping: float = 1e-6      # Tikhonov 正则化系数 λ
+    # 姿态误差相对位置误差的权重（1 rad 与 1/rot_weight m 等价）。<1 时，姿态不可达
+    # （如腕部 roll 到限位）会留下姿态误差，而不是挪动末端位置去凑姿态。
+    # Weight of the orientation error relative to the position error (1 rad counts as
+    # rot_weight m). Below 1, an unreachable orientation (e.g. the wrist roll at its limit)
+    # is left as orientation error instead of being approximated by moving the TCP.
+    # Reachable targets converge to the same solution either way.
+    rot_weight: float = 1.0
 
 
 @dataclass
@@ -88,12 +95,13 @@ def _compute_error(
     q: np.ndarray,
     target: pin.SE3,
     position_only: bool = False,
+    rot_weight: float = 1.0,
 ) -> tuple[float, np.ndarray]:
     """计算当前末端与目标之间的局部坐标系误差。
 
     返回:
         ``(err_norm, err_vector)``。仅位置模式返回 3 维线位移误差，
-        完整位姿模式返回 6 维 twist。
+        完整位姿模式返回 6 维 twist（角速度部分乘以 rot_weight）。
     """
     pin.forwardKinematics(model, data, q)
     pin.updateFramePlacements(model, data)
@@ -104,6 +112,9 @@ def _compute_error(
         err = T_cur.rotation.T @ (target.translation - T_cur.translation)
     else:
         err = pin.log6(T_cur.inverse() * target).vector
+        if rot_weight != 1.0:
+            err = err.copy()
+            err[3:] *= rot_weight
     return float(np.linalg.norm(err)), err
 
 
@@ -199,13 +210,15 @@ def solve_ik(
 
     nq = model.nq
     n_ctrl = controlled_joints if controlled_joints is not None else nq
+    # getattr: trajectory.clik_tracker has its own IKParams without rot_weight
+    w_rot = 1.0 if position_only else getattr(params, "rot_weight", 1.0)
 
     # 补齐 q_init 到 model.nq
     q = np.zeros(nq)
     n_provided = min(q_init.shape[0], n_ctrl)
     q[:n_provided] = q_init[:n_provided]
     prev_err, err = _compute_error(
-        model, data, end_frame_id, q, target, position_only,
+        model, data, end_frame_id, q, target, position_only, w_rot,
     )
 
     # 初始误差即已满足容差时直接返回
@@ -219,6 +232,9 @@ def solve_ik(
         J = pin.getFrameJacobian(model, data, end_frame_id, pin.LOCAL)
         if position_only:
             J = J[:3, :]
+        elif w_rot != 1.0:
+            J = J.copy()
+            J[3:, :] *= w_rot   # same weighting as the error (weighted least squares)
 
         # 自适应阻尼：误差较大时适当增加阻尼（Levenberg-Marquardt 风格）
         lam = params.damping * max(1.0, prev_err * 10.0)
@@ -239,7 +255,7 @@ def solve_ik(
         for _ in range(8):
             q_new = _clamp_config(model, pin.integrate(model, q, alpha * dq))
             new_err, err_new = _compute_error(
-                model, data, end_frame_id, q_new, target, position_only,
+                model, data, end_frame_id, q_new, target, position_only, w_rot,
             )
             if new_err < prev_err:
                 q = q_new
