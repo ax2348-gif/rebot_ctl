@@ -314,7 +314,11 @@
     <parent link="link5" />
     <child link="link6" />
     <axis xyz="0 0 1" />
-    <limit lower="-3.14" upper="3.14" effort="7" velocity="200" />
+    <!-- ±(π + π/12) = ±195°: 15° past upside-down each way, so flipping objects does not pin the
+         roll at its limit (the IK then fakes the roll with the base and wrist pitch). More would
+         strain the wrist cabling. RebotArm.check_joint_limits refuses readings past ±165° at
+         connect: there the single-turn encoder's power-on value is ambiguous by 2π. -->
+    <limit lower="-3.403392" upper="3.403392" effort="7" velocity="200" />
   </joint>
   <link name="end_link">
     <inertial>

@@ -1012,7 +1012,8 @@ class RebotArm:
 
         Read every joint's position; raise JointLimitError if any joint gives no
         feedback or reads outside its URDF limits (± LIMIT_MARGIN_RAD).
-        Joints without URDF limits (e.g. the gripper) are skipped.
+        Joints without URDF limits (e.g. the gripper) are skipped. A joint whose range spans
+        more than one turn (joint6) is also refused where its reading is ambiguous by 2π.
         """
         names = [jc.name for jc in self._all_joints if jc.name in self._joint_limits]
         if not names:
@@ -1051,6 +1052,17 @@ class RebotArm:
                 continue
             q = positions[name]
             if lo - m <= q <= hi + m:
+                # A joint whose range is wider than one turn (joint6: ±195°) can also be at
+                # q ± 2π. Its single-turn encoder cannot tell at power-on, and believing the
+                # wrong one would allow a whole extra turn (cable damage), so refuse.
+                alt = [k for k in (-1, 1) if lo <= q + k * 2 * math.pi <= hi]
+                if alt:
+                    problems.append(
+                        f"  {name}: reads {q:+.4f} rad ({math.degrees(q):+.1f}°), which within its "
+                        f"limits [{lo:+.3f}, {hi:+.3f}] rad is ambiguous: it may really be at "
+                        f"{math.degrees(q + alt[0] * 2 * math.pi):+.1f}° (single-turn encoder). "
+                        f"With the power off, turn it by hand back toward 0 (within "
+                        f"±{math.degrees(2 * math.pi - max(abs(lo), abs(hi))):.0f}°), power on and retry")
                 continue
             msg = (f"  {name}: reads {q:+.4f} rad ({math.degrees(q):+.1f}°), "
                    f"limits [{lo:+.3f}, {hi:+.3f}] rad")

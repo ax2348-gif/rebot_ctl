@@ -56,6 +56,26 @@ class JointLimitCheckTests(unittest.TestCase):
         self.assertIn("+1×2π", msg)
         self.assertNotIn("joint3", msg)
 
+    def test_joint6_range_is_pi_plus_15_deg(self):
+        lo, hi = RebotArm("rebotarm_dm.yaml")._joint_limits["joint6"]
+        self.assertAlmostEqual(hi, math.pi + math.pi / 12, places=5)
+        self.assertAlmostEqual(lo, -hi)
+
+    def test_joint6_inside_165_deg_connects(self):
+        for deg in (0.0, 160.0, -164.0):
+            robot, _ = self.connect_with({"joint6": math.radians(deg)})
+            self.assertTrue(robot._connected, deg)
+
+    def test_joint6_ambiguous_reading_refused(self):
+        # Past ±165° the same reading may be the pose 2π away (still inside ±195°).
+        for deg, alt in ((170.0, "-190.0°"), (-190.0, "+170.0°"), (194.0, "-166.0°")):
+            with self.assertRaises(JointLimitError) as cm:
+                self.connect_with({"joint6": math.radians(deg)})
+            msg = str(cm.exception)
+            self.assertIn("joint6", msg)
+            self.assertIn("ambiguous", msg)
+            self.assertIn(alt, msg)
+
     def test_disconnects_on_failure(self):
         robot = RebotArm("rebotarm_dm.yaml")
         ctrl = Mock()
